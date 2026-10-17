@@ -46,7 +46,7 @@ function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 function locked_(fn) {
-  const lock = LockService.getDocumentLock();
+  const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try { const r = fn(); SpreadsheetApp.flush(); return json_(r); }
   finally { lock.releaseLock(); }
