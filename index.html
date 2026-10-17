@@ -374,12 +374,13 @@ const getValues = range => call('get_values', {spreadsheetId: SHEET, range}).the
 
 async function loadAll(){
   S.status = S.txns.length ? 'refreshing' : 'loading'; S.err = null; paintSync();
-  const [tx, fx, rc, cats, bs] = await Promise.allSettled([
+  const [tx, fx, rc, cats, bs, sv] = await Promise.allSettled([
     getValues('Transakcijos!A1:G5000'),
     getValues("'Fiksuotos islaidos'!A1:G100"),
     getValues('Rekonsiliacija!A1:H1000'),
     getValues('Kategorijos!L1:M80'),
     getValues("'Seimos Biudzetas'!A1:AZ80"),
+    getValues('Santaupos!A1:F1000'),
   ]);
   if (tx.status === 'rejected'){ S.status = 'error'; S.err = tx.reason; render(); paintSync(); return; }
   S.txns = parseTx(tx.value);
@@ -388,6 +389,8 @@ async function loadAll(){
   if (cats.status === 'fulfilled') S.catList = cats.value.filter(r => r[0] && r[1] && r[0] !== 'Tipas').map(r => ({type:r[0], cat:r[1]}));
   if (bs.status === 'fulfilled'){ S.bsheet = parseBudgetSheet(bs.value); S.bsheetErr = null; if (!S.bud.dirty) S.bud.draft = null; }
   else S.bsheetErr = bs.reason;
+  if (sv.status === 'fulfilled'){ S.snaps = sv.value.slice(1).filter(r => r && r[0] && r[1] !== undefined && r[1] !== '').map(r => ({when: r[0], bal: num(r[1]), exp: r[2] === '' || r[2] === undefined ? null : num(r[2]), diff: num(r[3]), upto: parseInt(r[4], 10) || 0, note: r[5] || ''})); S.snapsErr = null; }
+  else S.snapsErr = sv.reason;
   S.status = 'ready'; S.lastSync = new Date();
   render(); paintSync();
 }
@@ -410,7 +413,7 @@ function parseBudgetSheet(rows){
     const mi = LT_MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); if (mi < 0) return;
     const vals = {}; let filled = false;
     cols.forEach(col => { const v = r[col.c]; if (v !== undefined && v !== ''){ vals[col.cat] = Math.abs(num(v)); if (col.kind === 'exp' && num(v)) filled = true; } });
-    months[m[2] + '-' + pad(mi+1)] = {row: i+1, vals, filled};
+    months[m[2] + '-' + pad(mi+1)] = {row: i+1, vals, filled, savingsH: r[7] !== undefined && r[7] !== '' ? num(r[7]) : null};
   });
   return {cols, months, width};
 }
@@ -432,6 +435,12 @@ function parseRecon(rows){
   return rows.slice(1).filter(r => r && r[0]).map(r => ({when: r[0], pk: pkFromLabel(r[1]) || null, revolut: num(r[2]), cash: num(r[3]), total: num(r[4]), book: num(r[5]), diff: num(r[6]), note: r[7] || ''}));
 }
 async function appendTxns(rows){
+  const st = savingsState(), delta = rows.filter(r => r.cat === SAVINGS).reduce((s, r) => s - r.amt, 0);
+  const start = await appendTxnsRaw(rows);
+  if (Math.abs(delta) > 0.004 && st.known){ try { await writeSavingsH(st.now + delta); } catch(e) {} }
+  return start;
+}
+async function appendTxnsRaw(rows){
   if (S.bridge){ const r = await call('append_tx', {rows: rows.map(r => ({serial: serial(r.date), type: r.type, cat: r.cat, amt: Math.round(r.amt*100)/100, note: r.note || '', vendor: r.vendor || '', periodOverride: r.periodOverride || ''}))}); return r.start; }
   const a = await getValues('Transakcijos!A1:A6000');
   const start = a.length + 1, end = start + rows.length - 1;
@@ -582,7 +591,7 @@ function viewNow(){
     (isCur && proj ? kpi('Total saving this month', '≈ ' + fmtE0(proj.projSurplus), (proj.projIncome ? Math.round(proj.projSurplus / proj.projIncome * 100) + '% of income · ' : '') + fmtE0(a.savings) + ' moved + ≈' + fmtE0(Math.max(0, proj.projNet)) + ' left over', proj.projSurplus < 0 ? 'neg' : '')
                    : kpi('Total saved', fmtE0(a.surplus), a.income ? Math.round(a.surplus / a.income * 100) + '% of income' : '', a.surplus < 0 ? 'neg' : '')) + '</div>';
   h += '<div class="split"><div class="card"><div class="card-h"><h2>Budget vs actual</h2><p>' + budgetSrc(pk) + ' · tap a group to drill in</p></div>' + groupBars(pk) + '</div>';
-  h += '<div style="display:flex;flex-direction:column;gap:16px;min-width:0">' + reconCard(pk, a) + recentCard(pk) + '</div></div>';
+  h += '<div style="display:flex;flex-direction:column;gap:16px;min-width:0">' + savingsCard() + reconCard(pk, a) + recentCard(pk) + '</div></div>';
   return h;
 }
 // Hero: a short ledger that walks from income to "left over", so every number on it is explained by the line above it.
@@ -592,7 +601,7 @@ function heroBlock(pk, a, proj, isCur, dLeft){
   let rows = '', big, eyebrow, sub;
   rows += line('Income received', '+' + fmtE(a.income).replace('−',''));
   rows += line('Spent', '−' + fmtE(a.spend).replace('−',''));
-  rows += line('Already moved to Seimos Santaupos', '−' + fmtE(a.savings).replace('−',''));
+  rows += a.savings >= 0 ? line('Already moved to Seimos Santaupos', '−' + fmtE(a.savings).replace('−','')) : line('Taken from Seimos Santaupos', '+' + fmtE(-a.savings));
   rows += line('In the joint account now', fmtE(a.net), 'tot');
   if (isCur && proj){
     if (proj.expInc > 0.5) rows += line('Income still expected', '+' + fmtE(proj.expInc));
@@ -693,7 +702,7 @@ function recentCard(pk){
 function txRow(t){
   const d = parseYmd(t.date); const g = t.type === 'Pajamos' ? null : (t.cat === SAVINGS ? null : G[groupOf(t.cat)]);
   const tr = t.cat === SAVINGS;
-  return '<div class="txr"><div class="d"><b>' + d.getDate() + '</b>' + MON3[d.getMonth()] + '</div><div class="m"><div class="v1">' + esc(t.vendor || t.cat) + '</div><div class="v2">' + (g ? '<span class="sw" style="background:' + g.color + ';width:8px;height:8px"></span>' : '') + (tr ? '<span class="pill">transfer</span>' : '') + esc(t.cat) + (t.note ? ' · ' + esc(t.note) : '') + '</div></div><div class="a ' + (t.amt > 0 ? 'pos' : tr ? 'mut' : '') + '">' + (tr ? '→ ' + fmtE(-t.amt) : fmtSigned(t.amt)) + '</div></div>';
+  return '<div class="txr"><div class="d"><b>' + d.getDate() + '</b>' + MON3[d.getMonth()] + '</div><div class="m"><div class="v1">' + esc(t.vendor || t.cat) + '</div><div class="v2">' + (g ? '<span class="sw" style="background:' + g.color + ';width:8px;height:8px"></span>' : '') + (tr ? '<span class="pill">' + (t.amt > 0 ? 'from savings' : 'to savings') + '</span>' : '') + esc(t.cat) + (t.note ? ' · ' + esc(t.note) : '') + '</div></div><div class="a ' + (t.amt > 0 ? 'pos' : tr ? 'mut' : '') + '">' + (tr ? (t.amt > 0 ? '← ' + fmtE(t.amt) : '→ ' + fmtE(-t.amt)) : fmtSigned(t.amt)) + '</div></div>';
 }
 
 // ----- Add -----
@@ -808,6 +817,55 @@ function aiBlock(){
   return '<div style="border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:10px"><div class="row"><button class="btn" data-act="ai"' + (S.ai.busy ? ' disabled' : '') + '>' + (S.ai.busy ? 'Claude is reading your numbers…' : 'Ask Claude for a deeper review') + '</button><span class="note">Uses your Claude account</span></div>' + (S.ai.text ? '<div class="ai-out" id="aiOut">' + esc(S.ai.text) + '</div>' : '') + (S.ai.err ? '<p class="note neg">' + esc(S.ai.err) + '</p>' : '') + '</div>';
 }
 
+// ----- Seimos Santaupos (savings account) -----
+// Confirmed balance = the last value typed in from Revolut (Santaupos tab). Since then, every
+// "Atsideta i seimos saskaita" row in Transakcijos moves money in (negative amount) or out (positive amount).
+function savingsState(){
+  const snaps = S.snaps || [], last = snaps.length ? snaps[snaps.length - 1] : null;
+  const interest = snaps.reduce((s, x) => s + (x.exp == null ? 0 : x.diff), 0);
+  if (!last){ const m = S.bsheet && S.bsheet.months[curPk()]; return {known: false, sheetH: m ? m.savingsH : null, interest}; }
+  const after = S.txns.filter(t => t.cat === SAVINGS && t.row > last.upto);
+  const inS = after.filter(t => t.amt < 0).reduce((s, t) => s - t.amt, 0), outS = after.filter(t => t.amt > 0).reduce((s, t) => s + t.amt, 0);
+  return {known: true, base: last.bal, baseWhen: last.when, inS, outS, now: last.bal + inS - outS, interest, after};
+}
+const maxTxRow = () => S.txns.reduce((m, t) => Math.max(m, t.row), 1);
+async function writeSavingsH(value){
+  const m = S.bsheet && S.bsheet.months[curPk()]; if (!m) return;
+  await call('update_values', {spreadsheetId: SHEET, range: "'Seimos Biudzetas'!H" + m.row, values: [[Math.round(value * 100) / 100]]});
+}
+async function appendRowTo(sheet, lastCol, values){
+  if (S.bridge) return call('append_row', {sheet, values});
+  const a = await getValues(sheet + '!A1:A3000'); const r = Math.max(2, a.length + 1);
+  return call('update_values', {spreadsheetId: SHEET, range: sheet + '!A' + r + ':' + lastCol + r, values: [values]});
+}
+function savingsCard(){
+  const s = savingsState();
+  let h = '<div class="card"><div class="card-h"><h2>Seimos Santaupos</h2><button class="btn ghost sm" data-act="goWithdraw">Withdraw ›</button></div>';
+  if (S.snapsErr) h += '<p class="note neg">Could not read the Santaupos tab. Tap Refresh.</p>';
+  if (s.known){
+    h += '<div class="recon-diff">' + fmtE(s.now) + '</div><dl class="kv"><dt>Confirmed in Revolut · ' + esc(String(s.baseWhen).slice(0, 10)) + '</dt><dd>' + fmtE(s.base) + '</dd>' +
+      (s.inS ? '<dt>Moved in since</dt><dd class="pos">+' + fmtE(s.inS) + '</dd>' : '') + (s.outS ? '<dt>Withdrawn since</dt><dd class="neg">−' + fmtE(s.outS) + '</dd>' : '') +
+      '<dt class="tot">Should be there now</dt><dd class="tot">' + fmtE(s.now) + '</dd>' + (Math.abs(s.interest) > 0.004 ? '<dt>Interest so far</dt><dd class="pos">' + fmtSigned(s.interest) + '</dd>' : '') + '</dl>';
+  } else {
+    h += '<p class="note">Enter today’s balance from the Revolut savings account to start tracking it.' + (s.sheetH != null ? ' Seimos Biudzetas currently shows <b class="num">' + fmtE(s.sheetH) + '</b> for ' + MONTHS[pParts(curPk())[1]-1] + '.' : '') + '</p>';
+  }
+  h += '<div class="row"><input class="inp num" id="svBal" inputmode="decimal" placeholder="Balance in Revolut now" style="flex:1;min-width:140px"><button class="btn primary" data-act="saveSnap"' + (S.busy.snap ? ' disabled' : '') + '>' + (S.busy.snap ? 'Saving…' : 'Update balance') + '</button></div>' +
+    '<p class="note">Interest makes the real balance drift; updating records the difference as interest and sets column H of Seimos Biudzetas for ' + MONTHS[pParts(curPk())[1]-1] + '.</p>';
+  return h + '</div>';
+}
+function withdrawCard(){
+  const s = savingsState(), W = S.wd || (S.wd = {open: false, amount: '', date: '', note: ''});
+  if (!W.date) W.date = ymd(new Date());
+  if (!W.open) return '<div class="row"><button class="btn" data-act="wdOpen">↩ Withdraw from Seimos Santaupos</button><span class="note">' + (s.known ? 'Savings now ' + fmtE(s.now) : '') + '</span></div>';
+  const v = num(W.amount);
+  return '<form class="card" id="wdForm" autocomplete="off"><div class="card-h"><h2>Withdraw from Seimos Santaupos</h2><button type="button" class="btn ghost sm" data-act="wdClose">Cancel</button></div>' +
+    '<p class="note">Records money moved from the savings account back to the Revolut joint account: one row in Transakcijos, category Atsideta i seimos saskaita with a positive amount. It is not counted as income.</p>' +
+    '<label class="f" for="wdAmt">Amount<span class="amt-wrap inc"><span class="amt-sign" aria-hidden="true">+€</span><input class="inp amount-inp num" id="wdAmt" inputmode="decimal" placeholder="0.00" value="' + esc(W.amount) + '" required></span></label>' +
+    '<div class="grid g2"><label class="f" for="wdDate">Date<input class="inp" type="date" id="wdDate" value="' + esc(W.date) + '"></label><label class="f" for="wdNote">What is it for<input class="inp" id="wdNote" placeholder="e.g. car repair" value="' + esc(W.note) + '"></label></div>' +
+    (s.known ? '<p class="note">Savings after this: <b class="num">' + fmtE(s.now - v) + '</b>' + (v > s.now + 0.005 ? ' <span class="neg">· more than the balance</span>' : '') + '</p>' : '') +
+    '<div class="row"><button class="btn primary" type="submit"' + (S.busy.wd ? ' disabled' : '') + '>' + (S.busy.wd ? 'Saving…' : 'Record withdrawal') + '</button></div></form>';
+}
+
 // ----- Budget -----
 function budActual(pk, col){ const a = agg(pk); return col.kind === 'inc' ? (a.incByCat[col.cat]||0) : col.kind === 'sav' ? a.savings : (a.byCat[col.cat]||0); }
 function fixedByCat(){ const m = {}; (S.fx || S.fixed).filter(f => f.active && f.type !== 'Pajamos').forEach(f => m[f.cat] = (m[f.cat]||0) + f.amount); return m; }
@@ -876,6 +934,9 @@ function budFill(fn){ const B = S.bsheet; B.cols.forEach(c => { const v = fn(c);
 
 // ----- Transactions -----
 function viewTx(){
+  return withdrawCard() + viewTxList();
+}
+function viewTxList(){
   const f = S.txf, pks = allPks().slice().reverse();
   const q = f.q.trim().toLowerCase();
   let list = S.txns.filter(t => (!f.pk || t.pk === f.pk) && (!f.type || t.type === f.type) && (!f.cat || (f.cat.startsWith('g:') ? (t.type === 'Islaidos' && t.cat !== SAVINGS && groupOf(t.cat) === f.cat.slice(2)) : t.cat === f.cat)) && (!q || (t.vendor + ' ' + t.note + ' ' + t.cat).toLowerCase().includes(q)));
@@ -1018,6 +1079,14 @@ document.addEventListener('click', async e => {
     const prevLen = S.fixed.length + 1; while (rows.length < prevLen) rows.push(['','','','','','','']);
     guardedWrite('fx', async () => { await call('update_values', {spreadsheetId: SHEET, range: "'Fiksuotos islaidos'!A1:G" + rows.length, values: rows}); S.fxDirty = false; S.fx = null; }, 'Fixed costs saved to the sheet'); }
   else if (act === 'ai'){ runAI(); }
+  else if (act === 'goWithdraw'){ S.wd = {open: true, amount: '', date: ymd(new Date()), note: ''}; setTab('tx'); }
+  else if (act === 'wdOpen'){ S.wd = {open: true, amount: '', date: ymd(new Date()), note: ''}; render(); }
+  else if (act === 'wdClose'){ S.wd.open = false; render(); }
+  else if (act === 'saveSnap'){
+    const raw = $('#svBal').value; const bal = num(raw); if (!raw.trim() || bal < 0){ toast('Enter the balance shown in Revolut'); return; }
+    const s = savingsState(), now = new Date(); const exp = s.known ? Math.round(s.now * 100) / 100 : '';
+    const row = [ymd(now) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()), Math.round(bal * 100) / 100, exp, s.known ? Math.round((bal - s.now) * 100) / 100 : '', maxTxRow(), s.known ? '' : 'Pradinis likutis'];
+    guardedWrite('snap', async () => { await appendRowTo('Santaupos', 'F', row); try { await writeSavingsH(bal); } catch(e) {} }, s.known ? 'Savings balance updated · ' + fmtSigned(bal - s.now) + ' vs expected' : 'Savings balance saved'); }
   else if (act === 'copyLink'){ const inp = $('#shareLink'); try { await navigator.clipboard.writeText(inp.value); toast('Setup link copied'); } catch(_){ inp.focus(); inp.select(); toast('Link selected — copy it from the menu'); } }
   else if (act === 'disconnect'){ if (t.dataset.confirm !== '1'){ t.dataset.confirm = '1'; t.textContent = 'Tap again to disconnect'; return; } saveBridge(null); S.bridge = null; S.txns = []; S.status = 'setup'; S.tab = 'settings'; render(); paintSync(); }
 });
@@ -1029,6 +1098,7 @@ document.addEventListener('input', e => {
   const id = e.target.id;
   if (id === 'rcRev' || id === 'rcCash'){ updateReconLive(); return; }
   if (e.target.dataset.fx){ if (!S.fxDirty){ S.fxDirty = true; readFxInputs(); render(); const el = document.getElementById(id); if (el){ el.focus(); if (el.setSelectionRange && el.type !== 'checkbox' && el.tagName === 'INPUT'){ const n = el.value.length; try { el.setSelectionRange(n, n); } catch(_){} } } } return; }
+  if (id === 'wdAmt' || id === 'wdNote'){ if (id === 'wdAmt'){ const c = e.target.value.replace(/[^\d.,]/g, ''); if (c !== e.target.value) e.target.value = c; S.wd.amount = c; } else S.wd.note = e.target.value; return; }
   if (id === 'aAmt'){ const v = e.target.value; const clean = v.replace(/[^\d.,]/g, ''); if (clean !== v) e.target.value = clean; S.add.amount = clean; return; }
   if (e.target.dataset.bud !== undefined){ S.bud.draft[e.target.dataset.bud] = e.target.value.replace(/[^\d.,]/g, ''); S.bud.dirty = true; updateBudgetLive(); return; }
   if (id === 'aNote') S.add.note = e.target.value;
@@ -1046,6 +1116,13 @@ document.addEventListener('change', e => {
   else if (e.target.dataset.fx){ readFxInputs(); S.fxDirty = true; if (e.target.dataset.fx === 'active' || e.target.dataset.fx === 'cat') render(); }
 });
 document.addEventListener('submit', e => {
+  if (e.target.id === 'wdForm'){
+    e.preventDefault(); const W = S.wd; W.amount = $('#wdAmt').value; W.date = $('#wdDate').value || ymd(new Date()); W.note = $('#wdNote').value.trim();
+    const v = Math.abs(num(W.amount)); if (!(v > 0)){ toast('Enter an amount above zero'); return; }
+    const row = {date: W.date, type: 'Pervedimas', cat: SAVINGS, amt: v, note: 'Paimta is Seimos Santaupos' + (W.note ? ': ' + W.note : ''), vendor: 'Seimos Santaupos'};
+    guardedWrite('wd', async () => { await appendTxns([row]); S.wd = {open: false, amount: '', date: '', note: ''}; }, fmtE(v) + ' withdrawal recorded');
+    return;
+  }
   if (e.target.id !== 'addForm') return; e.preventDefault();
   const A = S.add; A.amount = $('#aAmt').value; A.vendor = $('#aVendor').value.trim(); A.note = $('#aNote').value.trim(); A.date = $('#aDate').value; A.cat = $('#aCat').value;
   const v = Math.abs(num(A.amount));
