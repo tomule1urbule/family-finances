@@ -2,7 +2,8 @@
  * Family Finances 2026 — bridge between the phone app and this spreadsheet.
  *
  * Setup (once):
- *   1. In the "Family Finances 2026" sheet: Extensions → Apps Script.
+ *   1. Go to script.google.com → New project (works on a phone in Chrome's Desktop site),
+ *      or in the sheet: Extensions → Apps Script.
  *   2. Replace everything in Code.gs with this file and press Save.
  *   3. Set KEY below to a long random value (the app asks for the same value).
  *   4. Deploy → New deployment → type "Web app".
@@ -38,6 +39,9 @@ function doPost(e) {
   }
 }
 
+const SHEET_ID = '13ecuoVtA3oRFgHIi3gHDH7msAtxfuUfhwV2EV57j7CA'; // Family Finances 2026
+function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
+
 function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -48,7 +52,7 @@ function locked_(fn) {
   finally { lock.releaseLock(); }
 }
 function range_(a1) {
-  return SpreadsheetApp.getActiveSpreadsheet().getRange(a1);
+  return ss_().getRange(a1);
 }
 
 // Same shape as the Google Sheets connector: formatted cell text, trailing empty rows/cells trimmed.
@@ -81,7 +85,7 @@ function updateFormulas_(a1, formulas) {
 
 // Adds transactions after the last used row, all under one lock so two phones can't collide.
 function appendTx_(rows) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Transakcijos');
+  const sh = ss_().getSheetByName('Transakcijos');
   const start = lastRowInCol_(sh, 1) + 1;
   rows.forEach((r, i) => {
     const row = start + i;
@@ -94,7 +98,7 @@ function appendTx_(rows) {
   return { status: 'success', start: start };
 }
 function appendRow_(sheetName, values) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const sh = ss_().getSheetByName(sheetName);
   if (!sh) throw new Error('No tab named ' + sheetName);
   const row = lastRowInCol_(sh, 1) + 1;
   sh.getRange(row, 1, 1, values.length).setValues([values]);
