@@ -382,7 +382,7 @@ async function loadAll(){
     getValues('Rekonsiliacija!A1:H1000'),
     getValues('Kategorijos!L1:M80'),
     getValues("'Seimos Biudzetas'!A1:AZ80"),
-    getValues('Santaupos!A1:G1000'),
+    getValues('Santaupos!A1:F1000'),
   ]);
   if (tx.status === 'rejected'){ S.status = 'error'; S.err = tx.reason; render(); paintSync(); return; }
   S.txns = parseTx(tx.value);
@@ -391,7 +391,7 @@ async function loadAll(){
   if (cats.status === 'fulfilled') S.catList = cats.value.filter(r => r[0] && r[1] && r[0] !== 'Tipas').map(r => ({type:r[0], cat:r[1]}));
   if (bs.status === 'fulfilled'){ S.bsheet = parseBudgetSheet(bs.value); S.bsheetErr = null; if (!S.bud.dirty) S.bud.draft = null; }
   else S.bsheetErr = bs.reason;
-  if (sv.status === 'fulfilled'){ S.snaps = sv.value.slice(1).filter(r => r && r[0] && r[1] !== undefined && r[1] !== '').map(r => ({when: r[0], bal: num(r[1]), exp: r[2] === '' || r[2] === undefined ? null : num(r[2]), diff: num(r[3]), upto: parseInt(r[4], 10) || 0, note: r[5] || '', int: r[6] === undefined || r[6] === '' ? null : num(r[6])})); S.snapsErr = null; }
+  if (sv.status === 'fulfilled'){ S.snaps = sv.value.slice(1).filter(r => r && r[0] && r[1] !== undefined && r[1] !== '').map(r => ({when: r[0], bal: num(r[1]), exp: r[2] === '' || r[2] === undefined ? null : num(r[2]), diff: num(r[3]), upto: parseInt(r[4], 10) || 0, note: r[5] || ''})); S.snapsErr = null; }
   else S.snapsErr = sv.reason;
   S.status = 'ready'; S.lastSync = new Date();
   render(); paintSync();
@@ -824,12 +824,11 @@ function aiBlock(){
 // "Atsideta i seimos saskaita" row in Transakcijos moves money in (negative amount) or out (positive amount).
 function savingsState(){
   const snaps = S.snaps || [], last = snaps.length ? snaps[snaps.length - 1] : null;
-  const interest = snaps.reduce((s, x) => s + (x.exp == null ? 0 : (x.int != null ? x.int : x.diff)), 0);
-  const unrecorded = snaps.reduce((s, x) => s + (x.exp == null || x.int == null ? 0 : x.diff - x.int), 0);
+  const interest = snaps.reduce((s, x) => s + (x.exp == null ? 0 : x.diff), 0);
   if (!last){ const contrib = S.txns.filter(t => t.cat === SAVINGS).reduce((s, t) => s - t.amt, 0); return {known: false, contrib, interest}; }
   const after = S.txns.filter(t => t.cat === SAVINGS && t.row > last.upto);
   const inS = after.filter(t => t.amt < 0).reduce((s, t) => s - t.amt, 0), outS = after.filter(t => t.amt > 0).reduce((s, t) => s + t.amt, 0);
-  return {known: true, base: last.bal, baseWhen: last.when, inS, outS, now: last.bal + inS - outS, interest, unrecorded, after};
+  return {known: true, base: last.bal, baseWhen: last.when, inS, outS, now: last.bal + inS - outS, interest, after};
 }
 const maxTxRow = () => S.txns.reduce((m, t) => Math.max(m, t.row), 1);
 async function writeSavingsH(value){
@@ -848,7 +847,7 @@ function savingsCard(){
   if (s.known){
     h += '<div class="recon-diff">' + fmtE(s.now) + '</div><dl class="kv"><dt>Confirmed in Revolut · ' + esc(String(s.baseWhen).slice(0, 10)) + '</dt><dd>' + fmtE(s.base) + '</dd>' +
       (s.inS ? '<dt>Moved in since</dt><dd class="pos">+' + fmtE(s.inS) + '</dd>' : '') + (s.outS ? '<dt>Withdrawn since</dt><dd class="neg">−' + fmtE(s.outS) + '</dd>' : '') +
-      '<dt class="tot">Should be there now</dt><dd class="tot">' + fmtE(s.now) + '</dd>' + (Math.abs(s.interest) > 0.004 ? '<dt>Interest so far</dt><dd class="pos">' + fmtSigned(s.interest) + '</dd>' : '') + (Math.abs(s.unrecorded || 0) > 0.004 ? '<dt>Moved but not in Transakcijos</dt><dd>' + fmtSigned(s.unrecorded) + '</dd>' : '') + '</dl>';
+      '<dt class="tot">Should be there now</dt><dd class="tot">' + fmtE(s.now) + '</dd>' + (Math.abs(s.interest) > 0.004 ? '<dt>Interest so far</dt><dd class="pos">' + fmtSigned(s.interest) + '</dd>' : '') + '</dl>';
   } else {
     h += '<div class="recon-diff">' + fmtE(s.contrib) + '</div><dl class="kv"><dt>Transferred in since June, minus withdrawals</dt><dd>' + fmtE(s.contrib) + '</dd><dt>Interest</dt><dd class="mut">enter the Revolut balance to calculate</dd></dl>';
   }
@@ -872,7 +871,7 @@ function savingsTimeline(){
   const first = moves.length ? ymd(pStart(pkFromDate(moves[0].date))) : (snaps[0] ? snaps[0].date : ymd(new Date()));
   let bal = start; const pts = [{date: first, bal, kind: 'start', amt: 0}];
   for (const e of evs){
-    if (e.kind === 'snap'){ e.amt = e.snap.bal - bal; e.interest = e.snap.int != null ? e.snap.int : e.amt; e.adjust = e.amt - e.interest; bal = e.snap.bal; }
+    if (e.kind === 'snap'){ e.amt = e.snap.bal - bal; e.interest = e.amt; bal = e.snap.bal; }
     else bal += e.amt;
     e.bal = bal; pts.push(e);
   }
@@ -884,8 +883,8 @@ function savingsMonths(tl){
   let pk = pkFromDate(tl.pts[0].date); const end = curPk(); let bal = tl.start;
   while (pk <= end){
     const evs = tl.evs.filter(e => pkFromDate(e.date) === pk), sum = k => evs.filter(e => e.kind === k).reduce((s, e) => s + e.amt, 0);
-    const snapEv = evs.filter(e => e.kind === 'snap'); const r = {pk, startBal: bal, planned: sum('planned'), surplus: sum('surplus'), withdraw: -sum('withdraw'), interest: snapEv.reduce((s, e) => s + e.interest, 0), adjust: snapEv.reduce((s, e) => s + e.adjust, 0)};
-    bal = bal + r.planned + r.surplus - r.withdraw + r.interest + r.adjust; r.endBal = bal; out.push(r); pk = pShift(pk, 1);
+    const snapEv = evs.filter(e => e.kind === 'snap'); const r = {pk, startBal: bal, planned: sum('planned'), surplus: sum('surplus'), withdraw: -sum('withdraw'), interest: snapEv.reduce((s, e) => s + e.interest, 0)};
+    bal = bal + r.planned + r.surplus - r.withdraw + r.interest; r.endBal = bal; out.push(r); pk = pShift(pk, 1);
   }
   return out;
 }
@@ -908,21 +907,21 @@ function viewSavings(){
   const months = savingsMonths(tl), comp = months.filter(m => m.pk < curPk()).slice(-3);
   const totIn = tl.evs.filter(e => e.kind === 'planned' || e.kind === 'surplus').reduce((s, e) => s + e.amt, 0);
   const totOut = tl.evs.filter(e => e.kind === 'withdraw').reduce((s, e) => s - e.amt, 0);
-  const totInt = tl.evs.filter(e => e.kind === 'snap').reduce((s, e) => s + e.interest, 0), totAdj = tl.evs.filter(e => e.kind === 'snap').reduce((s, e) => s + e.adjust, 0);
+  const totInt = tl.evs.filter(e => e.kind === 'snap').reduce((s, e) => s + e.interest, 0);
   const pace = comp.length ? comp.reduce((s, m) => s + m.planned + m.surplus - m.withdraw, 0) / comp.length : 0;
   h += '<div class="hero"><div style="min-width:0"><div class="eyebrow">Seimos Santaupos · ' + (st.known ? 'expected now' : 'from transfers') + '</div><div class="big">' + fmtE(st.known ? st.now : tl.now) + '</div><div class="sub">' + (st.known ? 'Last confirmed in Revolut ' + esc(String(st.baseWhen).slice(0, 10)) + ': ' + fmtE(st.base) + '.' : 'Sum of every transfer in since June, minus withdrawals. Enter the Revolut balance to see the interest.') + '</div></div>' +
-    '<div class="hledger"><div class="hl"><span>Started at (' + shortD(parseYmd(tl.pts[0].date)) + ')</span><b>' + fmtE(tl.start) + '</b></div><div class="hl"><span>Moved in</span><b>+' + fmtE(totIn) + '</b></div><div class="hl"><span>Withdrawn</span><b>−' + fmtE(totOut) + '</b></div><div class="hl"><span>Interest</span><b>' + fmtSigned(totInt) + '</b></div>' + (Math.abs(totAdj) > 0.004 ? '<div class="hl"><span>Moved but not in Transakcijos</span><b>' + fmtSigned(totAdj) + '</b></div>' : '') + '<div class="hl tot"><span>Now</span><b>' + fmtE(tl.now) + '</b></div></div></div>';
+    '<div class="hledger"><div class="hl"><span>Started at (' + shortD(parseYmd(tl.pts[0].date)) + ')</span><b>' + fmtE(tl.start) + '</b></div><div class="hl"><span>Moved in</span><b>+' + fmtE(totIn) + '</b></div><div class="hl"><span>Withdrawn</span><b>−' + fmtE(totOut) + '</b></div><div class="hl"><span>Interest</span><b>' + fmtSigned(totInt) + '</b></div><div class="hl tot"><span>Now</span><b>' + fmtE(tl.now) + '</b></div></div></div>';
   h += '<div class="grid g4">' + kpi('Added per month', fmtE0(pace), 'average of the last ' + comp.length + ' completed months') +
     kpi('In 6 months', '≈ ' + fmtE0(tl.now + pace * 6), 'at that pace') + kpi('In 12 months', '≈ ' + fmtE0(tl.now + pace * 12), 'at that pace') +
     kpi('Interest earned', fmtSigned(totInt), (S.snaps || []).length + ' balance checks', totInt > 0 ? 'pos' : '') + '</div>';
   h += '<div class="card"><div class="card-h"><h2>Balance over time</h2><p>Each step is a transfer, withdrawal or balance check</p></div><div id="svBig"></div><div class="legend">' + Object.values(SV_KIND).map(k => '<span><i class="sw" style="background:' + k.color + ';border-radius:50%"></i>' + k.label + '</span>').join('') + '</div></div>';
   h += '<div class="card"><div class="card-h"><h2>Money in and out by month</h2><p>Financial months, 10th to 9th</p></div><div id="svFlows"></div><div class="legend">' + ['planned','surplus','snap','withdraw'].map(k => '<span><i class="sw" style="background:' + SV_KIND[k].color + '"></i>' + SV_KIND[k].label.replace(' (interest)', '') + '</span>').join('') + '</div>' +
-    '<div class="tscroll"><table class="t"><thead><tr><th>Month</th><th class="r">Start</th><th class="r">Transfer</th><th class="r">Surplus</th><th class="r">Withdrawn</th><th class="r">Interest</th><th class="r">Not recorded</th><th class="r">End</th></tr></thead><tbody>' +
-    months.slice().reverse().map(m => '<tr><td>' + MON3[pParts(m.pk)[1]-1] + ' ' + pParts(m.pk)[0] + (m.pk === curPk() ? '*' : '') + '</td><td class="r num mut">' + fmtE0(m.startBal) + '</td><td class="r num">' + (m.planned ? '+' + fmtE0(m.planned) : '<span class="mut">·</span>') + '</td><td class="r num">' + (m.surplus ? '+' + fmtE0(m.surplus) : '<span class="mut">·</span>') + '</td><td class="r num ' + (m.withdraw ? 'neg' : '') + '">' + (m.withdraw ? '−' + fmtE0(m.withdraw) : '<span class="mut">·</span>') + '</td><td class="r num">' + (Math.abs(m.interest) > 0.004 ? fmtSigned(m.interest) : '<span class="mut">·</span>') + '</td><td class="r num">' + (Math.abs(m.adjust) > 0.004 ? fmtSigned(m.adjust) : '<span class="mut">·</span>') + '</td><td class="r num"><b>' + fmtE0(m.endBal) + '</b></td></tr>').join('') +
+    '<div class="tscroll"><table class="t"><thead><tr><th>Month</th><th class="r">Start</th><th class="r">Transfer</th><th class="r">Surplus</th><th class="r">Withdrawn</th><th class="r">Interest</th><th class="r">End</th></tr></thead><tbody>' +
+    months.slice().reverse().map(m => '<tr><td>' + MON3[pParts(m.pk)[1]-1] + ' ' + pParts(m.pk)[0] + (m.pk === curPk() ? '*' : '') + '</td><td class="r num mut">' + fmtE0(m.startBal) + '</td><td class="r num">' + (m.planned ? '+' + fmtE0(m.planned) : '<span class="mut">·</span>') + '</td><td class="r num">' + (m.surplus ? '+' + fmtE0(m.surplus) : '<span class="mut">·</span>') + '</td><td class="r num ' + (m.withdraw ? 'neg' : '') + '">' + (m.withdraw ? '−' + fmtE0(m.withdraw) : '<span class="mut">·</span>') + '</td><td class="r num">' + (Math.abs(m.interest) > 0.004 ? fmtSigned(m.interest) : '<span class="mut">·</span>') + '</td><td class="r num"><b>' + fmtE0(m.endBal) + '</b></td></tr>').join('') +
     '</tbody></table></div><p class="note">* in progress. Month-end surplus lands on the 10th, so it shows in the month after the one that earned it.</p></div>';
   h += '<div class="card"><div class="card-h"><h2>All movements</h2><p>Newest first</p></div><div class="tx">' + tl.evs.slice().reverse().map(e => {
       const d = parseYmd(e.date), k = SV_KIND[e.kind];
-      const title = e.kind === 'snap' ? 'Balance checked: ' + fmtE(e.snap.bal) + (Math.abs(e.adjust) > 0.004 ? ' (interest ' + fmtSigned(e.interest) + ', not in Transakcijos ' + fmtSigned(e.adjust) + ')' : '') : e.kind === 'surplus' ? 'Surplus from ' + pLabel(e.t.pk) : e.kind === 'withdraw' ? (e.t.note.replace(/^Paimta is Seimos Santaupos:?\s*/, '') || 'Withdrawal') : 'Monthly transfer';
+      const title = e.kind === 'snap' ? 'Balance checked: ' + fmtE(e.snap.bal) : e.kind === 'surplus' ? 'Surplus from ' + pLabel(e.t.pk) : e.kind === 'withdraw' ? (e.t.note.replace(/^Paimta is Seimos Santaupos:?\s*/, '') || 'Withdrawal') : 'Monthly transfer';
       return '<div class="txr"><div class="d"><b>' + d.getDate() + '</b>' + MON3[d.getMonth()] + '</div><div class="m"><div class="v1">' + esc(title) + '</div><div class="v2"><span class="sw" style="background:' + k.color + ';width:8px;height:8px;border-radius:50%"></span>' + k.label + ' · balance ' + fmtE0(e.bal) + '</div></div><div class="a ' + (e.amt > 0.004 ? 'pos' : e.amt < -0.004 ? 'neg' : 'mut') + '">' + fmtSigned(e.amt) + '</div></div>';
     }).join('') + '</div></div>';
   return h;
