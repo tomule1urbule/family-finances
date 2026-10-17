@@ -214,6 +214,16 @@ table.t tr.off td{opacity:.55}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 #tip{position:fixed;z-index:50;pointer-events:none;background:var(--fg);color:var(--bg);font-size:.78rem;padding:7px 9px;border-radius:7px;max-width:260px;line-height:1.35;box-shadow:var(--shadow)}
 #tip b{font-family:var(--f-mono);font-weight:500}
+#toast .toast-act{margin-left:12px;border:0;background:none;color:var(--accent);font-weight:700;cursor:pointer;padding:0}
+.sheet-bg{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.4);display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--surface);width:100%;max-width:560px;border-radius:16px 16px 0 0;padding:18px max(16px,env(safe-area-inset-left,0px)) calc(18px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:12px;max-height:92vh;overflow:auto}
+@media (min-width:700px){.sheet-bg{align-items:center}.sheet{border-radius:16px}}
+.txr.tap{cursor:pointer;border-radius:8px}
+.txr.tap:hover{background:var(--surface-2)}
+.wkbars{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;align-items:end;height:120px}
+.wkbars div{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px;height:100%;font-size:.72rem;color:var(--muted)}
+.wkbars i{display:block;width:70%;border-radius:4px 4px 0 0;background:var(--s2)}
+.wkbars b{font-family:var(--f-mono);font-weight:500;color:var(--fg);font-size:.72rem}
 #toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:60;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:.86rem;box-shadow:var(--shadow);max-width:calc(100% - 32px)}
 .insight{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;padding:10px 0;border-top:1px solid var(--line)}
 .insight:first-child{border-top:0}
@@ -334,7 +344,11 @@ const pDays = pk => Math.round((pStart(pShift(pk,1)) - pStart(pk)) / 86400000);
 const shortD = d => d.getDate() + ' ' + MON3[d.getMonth()];
 const dayIdx = (pk, ymdStr) => Math.round((parseYmd(ymdStr) - pStart(pk)) / 86400000);
 
-function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 3800); }
+function toast(msg, action){
+  const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t);
+  if (action){ const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = action.label; b.onclick = () => { t.hidden = true; action.fn(); }; t.appendChild(b); }
+  toast._t = setTimeout(() => t.hidden = true, action ? 7000 : 3800);
+}
 
 // ---------- connector ----------
 function errCopy(e){
@@ -586,6 +600,7 @@ function viewNow(){
   h += heroBlock(pk, a, proj, isCur, dLeft);
   // pending actions
   if (isCur && S.fixedLoaded) h += pendingBlock();
+  if (isCur) h += budgetAlerts(pk);
   h += '<div class="grid g4">' +
     kpi('Income', fmtE(a.income), proj ? (isCur && proj.expInc > 0.5 ? fmtE(proj.expInc) + ' still expected' : 'all expected income in') : '') +
     kpi('Spent', fmtE(a.spend), 'transfers to savings not included') +
@@ -622,6 +637,24 @@ function heroBlock(pk, a, proj, isCur, dLeft){
     (isCur ? '<div class="sub" style="margin-top:10px"><b>' + dLeft + '</b> days left · month ends ' + shortD(pEnd(pk)) + '</div>' : '') + '</div>' +
     '<div class="hledger" aria-label="How this is calculated">' + rows + '</div></div>';
 }
+// Categories at 80%+ of budget, skipping lines that are mostly fixed costs (loans, allowances, insurance).
+function budgetAlertList(pk){
+  const b = budgetFor(pk); if (!b || b.src !== pk) return [];
+  const a = agg(pk), fx = fixedByCat(), out = [];
+  for (const [c, bud] of Object.entries(b.map)){
+    if (INCOME_CATS.includes(c) || c === SAVINGS || !(bud > 0)) continue;
+    if ((fx[c] || 0) >= bud * 0.9) continue;
+    const act = a.byCat[c] || 0, r = act / bud; if (r >= 0.8) out.push({c, bud, act, r});
+  }
+  return out.sort((x, y) => y.r - x.r);
+}
+function budgetAlerts(pk){
+  const l = budgetAlertList(pk); if (!l.length) return '';
+  const over = l.filter(x => x.r > 1.0001), near = l.filter(x => x.r <= 1.0001);
+  const days = Math.max(0, Math.round((pEnd(pk) - new Date(new Date().toDateString())) / 86400000) + 1);
+  const line = x => '<button class="btn ghost sm" style="padding:2px 0" data-act="drillCat" data-cat="' + esc(x.c) + '" data-pk="' + pk + '">' + esc(x.c) + '</button> <span class="num">' + fmtE0(x.act) + ' / ' + fmtE0(x.bud) + '</span> (' + Math.round(x.r * 100) + '%)';
+  return banner(over.length ? 'crit' : 'warn', over.length ? over.length + ' over budget' + (near.length ? ', ' + near.length + ' close' : '') : near.length + ' close to the budget', l.slice(0, 6).map(line).join('<br>') + '<br><span class="mut">' + days + ' days left in the month.</span>');
+}
 function budgetSrc(pk){ const b = budgetFor(pk); if (!b) return S.bsheetErr ? 'Budget could not be read' : 'Loading budget…'; if (!b.src) return 'No budget planned yet'; return b.src === pk ? 'Budget from Seimos Biudzetas' : MONTHS[pParts(pk)[1]-1] + ' not planned · using ' + MONTHS[pParts(b.src)[1]-1] + ' budget'; }
 function banner(kind, title, body, actions=''){ const ic = {warn:'!', crit:'!', good:'✓', info:'i'}[kind] || 'i'; return '<div class="banner ' + kind + '"><span class="pill ' + (kind === 'info' ? '' : kind) + ' bi" aria-hidden="true">' + ic + '</span><div class="bb"><b>' + esc(title) + '</b>' + (body ? '<p>' + body + '</p>' : '') + (actions ? '<div class="row">' + actions + '</div>' : '') + '</div></div>'; }
 function pendingBlock(){
@@ -635,7 +668,7 @@ function pendingBlock(){
   }
   const sp = surplusPending();
   if (sp && !sp.done && !sp.dismissed && sp.net > 1){
-    h += banner('info', pLabel(sp.pk) + ' left ' + fmtE(sp.net) + ' in the joint account', 'That is the month’s surplus after spending and the transfers already made. Moving it to Seimos Santaupos is recorded as one transfer row (“Atsideta i seimos saskaita”, dated ' + shortD(pStart(cur)) + ', booked to ' + pLabel(sp.pk) + '). No matching income row is needed, and it does not count as spending.',
+    h += banner('info', pLabel(sp.pk) + ' left ' + fmtE(sp.net) + ' in the joint account', 'That is the month’s surplus after spending and the transfers already made. Move it in Revolut first, then enter the amount you actually moved. It is recorded as one transfer row (“Atsideta i seimos saskaita”, dated ' + shortD(pStart(cur)) + ', booked to ' + pLabel(sp.pk) + '). No matching income row is needed, and it does not count as spending.',
       '<label class="f" style="flex-direction:row;align-items:center;gap:6px">Amount <input class="inp num" id="spAmt" inputmode="decimal" style="width:110px;padding:6px 8px" value="' + sp.net.toFixed(2) + '"></label><button class="btn primary sm" data-act="postSurplus"' + (S.busy.postSurplus ? ' disabled' : '') + '>' + (S.busy.postSurplus ? 'Saving…' : 'Record transfer') + '</button><button class="btn ghost sm" data-act="skipSurplus">Not this month</button>');
   } else if (sp && !sp.done && sp.net < -1 && !sp.dismissed){
     h += banner('crit', pLabel(sp.pk) + ' closed ' + fmtE(-sp.net) + ' short', 'Spending exceeded income last month, so there is no surplus to move to Seimos Santaupos.', '<button class="btn ghost sm" data-act="skipSurplus">Dismiss</button>');
@@ -704,7 +737,7 @@ function recentCard(pk){
 function txRow(t){
   const d = parseYmd(t.date); const g = t.type === 'Pajamos' ? null : (t.cat === SAVINGS ? null : G[groupOf(t.cat)]);
   const tr = t.cat === SAVINGS;
-  return '<div class="txr"><div class="d"><b>' + d.getDate() + '</b>' + MON3[d.getMonth()] + '</div><div class="m"><div class="v1">' + esc(t.vendor || t.cat) + '</div><div class="v2">' + (g ? '<span class="sw" style="background:' + g.color + ';width:8px;height:8px"></span>' : '') + (tr ? '<span class="pill">' + (t.amt > 0 ? 'from savings' : 'to savings') + '</span>' : '') + esc(t.cat) + (t.note ? ' · ' + esc(t.note) : '') + '</div></div><div class="a ' + (t.amt > 0 ? 'pos' : tr ? 'mut' : '') + '">' + (tr ? (t.amt > 0 ? '← ' + fmtE(t.amt) : '→ ' + fmtE(-t.amt)) : fmtSigned(t.amt)) + '</div></div>';
+  return '<div class="txr tap" role="button" tabindex="0" data-act="editTx" data-row="' + t.row + '" aria-label="Edit ' + esc(t.vendor || t.cat) + '"><div class="d"><b>' + d.getDate() + '</b>' + MON3[d.getMonth()] + '</div><div class="m"><div class="v1">' + esc(t.vendor || t.cat) + '</div><div class="v2">' + (g ? '<span class="sw" style="background:' + g.color + ';width:8px;height:8px"></span>' : '') + (tr ? '<span class="pill">' + (t.amt > 0 ? 'from savings' : 'to savings') + '</span>' : '') + esc(t.cat) + (t.note ? ' · ' + esc(t.note) : '') + '</div></div><div class="a ' + (t.amt > 0 ? 'pos' : tr ? 'mut' : '') + '">' + (tr ? (t.amt > 0 ? '← ' + fmtE(t.amt) : '→ ' + fmtE(-t.amt)) : fmtSigned(t.amt)) + '</div></div>';
 }
 
 // ----- Add -----
@@ -757,9 +790,50 @@ function viewAnalytics(){
   h += '<div class="card"><div class="card-h"><h2>Insights</h2><p>From your transactions</p></div><div>' + insights().map(i => '<div class="insight"><span class="ic ' + i.tone + '">' + ({good:'✓',warn:'!',crit:'!',info:'i'}[i.tone]) + '</span><b>' + i.title + '</b><p>' + i.body + '</p></div>').join('') + '</div>' + aiBlock() + '</div></div>';
   h += '<div class="split"><div class="card"><div class="card-h"><h2>Spending pace</h2><p>Variable spending, cumulative by day of the financial month</p></div><div id="chPace"></div><div class="legend"><span><i class="sw" style="background:var(--s1)"></i>' + esc(pLabel(S.pk)) + '</span><span><i class="sw" style="background:var(--faint)"></i>Average of previous months</span>' + (budgetFor(S.pk) && varRemaining(S.pk) ? '<span><i class="sw" style="background:var(--crit);height:2px;width:14px;border-radius:0"></i>Variable budget</span>' : '') + '</div></div>';
   h += '<div class="card"><div class="card-h"><h2>Top vendors</h2><p>' + esc(pLabel(S.pk)) + ' · tap to see transactions</p></div>' + topVendors(S.pk) + '</div></div>';
+  h += '<div class="split"><div class="card"><div class="card-h"><h2>Baby</h2><p>Vaiko spending vs child benefits</p></div>' + babyCard(shown) + '</div><div class="card"><div class="card-h"><h2>Mozza</h2><p>Routine costs vs vet bills</p></div>' + mozzaCard(shown) + '</div></div>';
+  h += '<div class="card"><div class="card-h"><h2>When the money goes</h2><p>Variable spending by weekday · last 3 completed months</p></div>' + weekdayCard() + '</div>';
   h += '<div class="card"><div class="card-h"><h2>Category trends</h2><p>Last ' + shown.length + ' months · tap a cell to see transactions</p></div>' + catTable(shown, aggs) + '</div>';
   h += '<div class="card"><div class="card-h"><h2>Income sources</h2><p>By month</p></div>' + incomeTable(shown, aggs) + '</div>';
   return h;
+}
+function miniBars(rows, fmt){
+  const max = Math.max(1, ...rows.map(r => Math.max(r.a, r.b || 0)));
+  return '<div class="bars">' + rows.map(r => '<div class="brow" style="cursor:default"><span class="bname"><span class="t">' + r.label + '</span></span><span class="bval">' + fmt(r) + '</span><span class="track"><i style="width:' + (r.a / max * 100) + '%;background:' + r.color + '"></i>' + (r.b != null ? '<span class="mark" style="left:' + Math.min(100, r.b / max * 100) + '%"></span>' : '') + '</span></div>').join('') + '</div>';
+}
+function babyCard(pks){
+  const rows = pks.map(p => { const a = agg(p), spend = G.kid.cats.reduce((s, c) => s + (a.byCat[c] || 0), 0), ben = a.incByCat['Vaiko pinigai'] || 0; return {p, spend, ben}; }).filter(r => r.spend || r.ben);
+  if (!rows.length) return '<div class="empty">No baby spending yet.</div>';
+  const comp = rows.filter(r => r.p < curPk()), avg = comp.length ? comp.reduce((s, r) => s + r.spend, 0) / comp.length : 0;
+  const tot = rows.reduce((s, r) => s + r.spend, 0), totB = rows.reduce((s, r) => s + r.ben, 0);
+  const vend = {}; S.txns.filter(t => pks.includes(t.pk) && G.kid.cats.includes(t.cat)).forEach(t => { vend[t.vendor] = (vend[t.vendor] || 0) - t.amt; });
+  const top = Object.entries(vend).sort((x, y) => y[1] - x[1]).slice(0, 3);
+  return '<div class="grid g3">' + kpi('Spent', fmtE0(tot), rows.length + ' months') + kpi('Benefits received', fmtE0(totB), 'Vaiko pinigai') + kpi('Per month', fmtE0(avg), 'completed months') + '</div>' +
+    miniBars(rows.map(r => ({label: MON3[pParts(r.p)[1]-1] + (r.p === curPk() ? '*' : ''), a: r.spend, b: r.ben, color: 'var(--s3)'})), r => fmtE0(r.a) + ' <span class="of">· benefit ' + fmtE0(r.b) + '</span>') +
+    '<p class="note">Bar = spent, tick = child benefit received. ' + (totB >= tot ? 'Benefits have covered all baby spending so far (' + fmtE0(totB - tot) + ' left over).' : 'Net cost after benefits: ' + fmtE0(tot - totB) + '.') + (top.length ? ' Biggest: ' + top.map(([v, x]) => esc(v) + ' ' + fmtE0(x)).join(', ') + '.' : '') + '</p>';
+}
+function mozzaCard(pks){
+  const rows = pks.map(p => { const a = agg(p); return {p, routine: a.byCat['Mozza'] || 0, vet: a.byCat['Veterinaras'] || 0}; }).filter(r => r.routine || r.vet);
+  if (!rows.length) return '<div class="empty">No Mozza costs yet.</div>';
+  const comp = rows.filter(r => r.p < curPk()), avgR = comp.length ? comp.reduce((s, r) => s + r.routine, 0) / comp.length : 0;
+  const totR = rows.reduce((s, r) => s + r.routine, 0), totV = rows.reduce((s, r) => s + r.vet, 0);
+  const vend = {}; S.txns.filter(t => pks.includes(t.pk) && t.cat === 'Mozza').forEach(t => { vend[t.vendor] = (vend[t.vendor] || 0) - t.amt; });
+  const top = Object.entries(vend).sort((x, y) => y[1] - x[1]).slice(0, 3);
+  return '<div class="grid g3">' + kpi('Routine', fmtE0(totR), 'food, care, daycare') + kpi('Vet bills', fmtE0(totV), 'Veterinaras') + kpi('Routine / month', fmtE0(avgR), 'completed months') + '</div>' +
+    miniBars(rows.map(r => ({label: MON3[pParts(r.p)[1]-1] + (r.p === curPk() ? '*' : ''), a: r.routine + r.vet, color: 'var(--s2)', r})), x => fmtE0(x.r.routine) + (x.r.vet ? ' <span class="of">+ vet ' + fmtE0(x.r.vet) + '</span>' : '')) +
+    '<p class="note">' + (top.length ? 'Routine spending goes mostly to ' + top.map(([v, x]) => esc(v) + ' (' + fmtE0(x) + ')').join(', ') + '. ' : '') + 'Vet bills sit under Nenumatytos → Veterinaras, so the monthly Mozza budget only has to cover routine costs.</p>';
+}
+const WD = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function weekdayCard(){
+  const comp = allPks().filter(p => p < curPk()).slice(-3); if (!comp.length) return '<div class="empty">Needs one completed month.</div>';
+  const tx = S.txns.filter(t => comp.includes(t.pk) && t.type === 'Islaidos' && t.cat !== SAVINGS && VARIABLE.has(groupOf(t.cat)) && !fixedLike(t));
+  const sum = new Array(7).fill(0), cnt = new Array(7).fill(0);
+  tx.forEach(t => { const d = (parseYmd(t.date).getDay() + 6) % 7; sum[d] += -t.amt; cnt[d]++; });
+  const max = Math.max(1, ...sum), top = sum.indexOf(Math.max(...sum)), weeks = comp.reduce((s, p) => s + pDays(p), 0) / 7;
+  const small = tx.filter(t => -t.amt < 10), smallSum = small.reduce((s, t) => s - t.amt, 0);
+  const groc = tx.filter(t => t.cat === 'Maistas'), wkEnd = sum[5] + sum[6], total = sum.reduce((a, b) => a + b, 0);
+  return '<div class="wkbars">' + sum.map((v, i) => '<div><b>' + fmtE0(v / weeks) + '</b><i style="height:' + Math.max(2, v / max * 80) + '%;' + (i === top ? '' : 'opacity:.55') + '"></i>' + WD[i] + '</div>').join('') + '</div>' +
+    '<p class="note">Average per weekday per week. ' + WD[top] + ' is the biggest spending day (' + cnt[top] + ' purchases in ' + comp.length + ' months). Weekends take ' + Math.round(wkEnd / Math.max(1, total) * 100) + '% of variable spending.</p>' +
+    '<div class="grid g3">' + kpi('Small purchases', Math.round(small.length / comp.length) + ' / month', 'under €10 each') + kpi('They add up to', fmtE0(smallSum / comp.length) + ' / month', Math.round(smallSum / Math.max(1, total) * 100) + '% of variable spending') + kpi('Grocery trips', Math.round(groc.length / comp.length) + ' / month', 'avg basket ' + fmtE(groc.reduce((s, t) => s - t.amt, 0) / Math.max(1, groc.length))) + '</div>';
 }
 function topVendors(pk){
   const m = {}; txIn(pk).filter(t => t.type === 'Islaidos' && t.cat !== SAVINGS && !fixedLike(t) && groupOf(t.cat) !== 'pers').forEach(t => { const k = t.vendor || t.cat; m[k] = m[k] || {v:k, s:0, n:0, g:groupOf(t.cat)}; m[k].s += -t.amt; m[k].n++; });
@@ -819,6 +893,85 @@ function aiBlock(){
   return '<div style="border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:10px"><div class="row"><button class="btn" data-act="ai"' + (S.ai.busy ? ' disabled' : '') + '>' + (S.ai.busy ? 'Claude is reading your numbers…' : 'Ask Claude for a deeper review') + '</button><span class="note">Uses your Claude account</span></div>' + (S.ai.text ? '<div class="ai-out" id="aiOut">' + esc(S.ai.text) + '</div>' : '') + (S.ai.err ? '<p class="note neg">' + esc(S.ai.err) + '</p>' : '') + '</div>';
 }
 
+// ----- Emergency fund: how many months of normal spending the savings would cover -----
+function emergencyFund(){
+  const comp = allPks().filter(p => p < curPk()).slice(-3); if (!comp.length) return null;
+  const avg = comp.reduce((s, p) => s + agg(p).spend, 0) / comp.length; if (avg <= 0) return null;
+  const st = savingsState(), tl = savingsTimeline(), bal = st.known ? st.now : (tl ? tl.now : null); if (bal == null) return null;
+  return {months: bal / avg, avg, bal, n: comp.length};
+}
+
+// ----- Edit / delete a transaction -----
+function allCatsFor(type){
+  if (type === 'Pajamos') return INCOME_CATS.slice();
+  const known = [...GROUPS.flatMap(g => g.cats), SAVINGS];
+  S.catList.filter(c => c.type === 'Islaidos' && !known.includes(c.cat)).forEach(c => known.push(c.cat));
+  return known;
+}
+function editSheet(){
+  const E = S.edit; if (!E) return '';
+  const cats = allCatsFor(E.type === 'Pajamos' ? 'Pajamos' : 'Islaidos');
+  if (!cats.includes(E.cat)) cats.unshift(E.cat);
+  return '<div class="sheet-bg" data-act="editClose"><form class="sheet" id="editForm" autocomplete="off"><div class="card-h"><h2>Edit transaction</h2><span class="note">Transakcijos row ' + E.row + '</span></div>' +
+    '<div class="seg" role="group" aria-label="Type">' + ['Islaidos','Pajamos','Pervedimas'].map(t => '<button type="button" data-act="editType" data-v="' + t + '" aria-pressed="' + (E.type === t) + '">' + ({Islaidos:'Expense', Pajamos:'Income', Pervedimas:'Transfer'})[t] + '</button>').join('') + '</div>' +
+    '<label class="f" for="edAmt">Amount<span class="amt-wrap ' + (E.type === 'Pajamos' || (E.type === 'Pervedimas' && E.sign > 0) ? 'inc' : 'exp') + '"><span class="amt-sign" aria-hidden="true">' + (E.type === 'Pajamos' || (E.type === 'Pervedimas' && E.sign > 0) ? '+€' : '−€') + '</span><input class="inp amount-inp num" id="edAmt" inputmode="decimal" value="' + esc(E.amount) + '"></span></label>' +
+    '<div class="grid g2"><label class="f" for="edCat">Category<select class="inp" id="edCat">' + cats.map(c => '<option' + (c === E.cat ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></label><label class="f" for="edVendor">Vendor<input class="inp" id="edVendor" list="vendors2" value="' + esc(E.vendor) + '"></label></div>' +
+    '<datalist id="vendors2">' + vendorStats().slice(0, 200).map(v => '<option value="' + esc(v.vendor) + '">').join('') + '</datalist>' +
+    '<div class="grid g2"><label class="f" for="edDate">Date<input class="inp" type="date" id="edDate" value="' + esc(E.date) + '"></label><label class="f" for="edNote">Comment<input class="inp" id="edNote" value="' + esc(E.note) + '"></label></div>' +
+    '<div class="row"><button class="btn primary" type="submit"' + (S.busy.edit ? ' disabled' : '') + '>' + (S.busy.edit ? 'Saving…' : 'Save changes') + '</button><button class="btn ghost" type="button" data-act="editClose">Cancel</button><span class="spacer"></span><button class="btn sm" type="button" data-act="editDelete" style="color:var(--crit-ink)">' + (E.confirmDel ? 'Tap again to delete' : 'Delete') + '</button></div></form></div>';
+}
+function openEdit(row){
+  const t = S.txns.find(x => x.row === row); if (!t) return;
+  S.edit = {row, orig: t, type: t.type === 'Pajamos' ? 'Pajamos' : t.type === 'Pervedimas' ? 'Pervedimas' : 'Islaidos', sign: t.amt >= 0 ? 1 : -1, amount: Math.abs(t.amt).toFixed(2), cat: t.cat, vendor: t.vendor, date: t.date, note: t.note, confirmDel: false};
+  renderEdit();
+}
+function renderEdit(){
+  let host = $('#editHost'); if (!host){ host = document.createElement('div'); host.id = 'editHost'; document.body.appendChild(host); }
+  host.innerHTML = editSheet();
+}
+function closeEdit(){ S.edit = null; renderEdit(); }
+function readEdit(){ const E = S.edit; E.amount = $('#edAmt').value; E.cat = $('#edCat').value; E.vendor = $('#edVendor').value.trim(); E.date = $('#edDate').value || E.date; E.note = $('#edNote').value.trim(); }
+// The row must still hold what the app showed; otherwise someone changed the sheet in between.
+async function checkRowUnchanged(o){
+  const v = await getValues('Transakcijos!A' + o.row + ':G' + o.row); const r = v[0] || [];
+  return normDate(r[0]) === o.date && String(r[2] || '').trim() === o.cat && Math.abs(num(r[3]) - o.amt) < 0.005;
+}
+function rowValues(t){ return [serial(t.date), t.type, t.cat, Math.round(t.amt * 100) / 100, t.note || '', t.vendor || '']; }
+function gFormula(r){ const c = 'A' + r; return '=TEXT(IF(DAY(' + c + ') < 10, ' + c + ' - DAY(' + c + '), ' + c + '), "YYY, MMMM")'; }
+async function writeRow(row, t, label){
+  await call('update_values', {spreadsheetId: SHEET, range: 'Transakcijos!A' + row + ':F' + row, values: [rowValues(t)]});
+  if (label) await call('update_values', {spreadsheetId: SHEET, range: 'Transakcijos!G' + row, values: [[label]]});
+  else await call('update_formulas', {spreadsheetId: SHEET, range: 'Transakcijos!G' + row, formulas: [[gFormula(row)]]});
+}
+const isOverride = t => t.pk !== pkFromDate(t.date);
+async function saveEdit(){
+  readEdit(); const E = S.edit, o = E.orig, v = Math.abs(num(E.amount));
+  if (!(v > 0)){ toast('Enter an amount above zero'); return; }
+  const sign = E.type === 'Pajamos' ? 1 : E.type === 'Pervedimas' ? E.sign : -1;
+  const nt = {date: E.date, type: E.type, cat: E.cat, amt: sign * v, note: E.note, vendor: E.vendor};
+  S.busy.edit = true; renderEdit();
+  try {
+    if (!(await checkRowUnchanged(o))){ toast('This row was changed in the sheet. Reloaded — please try again.'); closeEdit(); await loadAll(); return; }
+    await writeRow(o.row, nt, isOverride(o) && nt.date === o.date ? pSheetLabel(o.pk) : null);
+    const st = savingsState(), d = (o.cat === SAVINGS ? o.amt : 0) - (nt.cat === SAVINGS ? nt.amt : 0);
+    if (Math.abs(d) > 0.004 && st.known){ try { await writeSavingsH(st.now + d); } catch(e) {} }
+    closeEdit(); toast('Saved row ' + o.row, {label: 'Undo', fn: () => guardedWrite('undo', () => writeRow(o.row, o, isOverride(o) ? pSheetLabel(o.pk) : null), 'Change undone')});
+    await loadAll();
+  } catch(e){ const c = errCopy(e); toast(c.title + '. ' + c.body); }
+  finally { S.busy.edit = false; renderEdit(); }
+}
+async function deleteEdit(){
+  const o = S.edit.orig; S.busy.edit = true; renderEdit();
+  try {
+    if (!(await checkRowUnchanged(o))){ toast('This row was changed in the sheet. Reloaded — please try again.'); closeEdit(); await loadAll(); return; }
+    await call('update_values', {spreadsheetId: SHEET, range: 'Transakcijos!A' + o.row + ':G' + o.row, values: [['', '', '', '', '', '', '']]});
+    const st = savingsState(); if (o.cat === SAVINGS && st.known){ try { await writeSavingsH(st.now + o.amt); } catch(e) {} }
+    closeEdit(); toast('Deleted ' + fmtE(o.amt) + ' · ' + o.cat, {label: 'Undo', fn: () => guardedWrite('undo', () => writeRow(o.row, o, isOverride(o) ? pSheetLabel(o.pk) : null), 'Transaction restored')});
+    await loadAll();
+  } catch(e){ const c = errCopy(e); toast(c.title + '. ' + c.body); }
+  finally { S.busy.edit = false; renderEdit(); }
+}
+
 // ----- Seimos Santaupos (savings account) -----
 // Confirmed balance = the last value typed in from Revolut (Santaupos tab). Since then, every
 // "Atsideta i seimos saskaita" row in Transakcijos moves money in (negative amount) or out (positive amount).
@@ -847,6 +1000,7 @@ function savingsCard(){
   if (s.known){
     h += '<div class="recon-diff">' + fmtE(s.now) + '</div><dl class="kv"><dt>Confirmed in Revolut · ' + esc(String(s.baseWhen).slice(0, 10)) + '</dt><dd>' + fmtE(s.base) + '</dd>' +
       (s.inS ? '<dt>Moved in since</dt><dd class="pos">+' + fmtE(s.inS) + '</dd>' : '') + (s.outS ? '<dt>Withdrawn since</dt><dd class="neg">−' + fmtE(s.outS) + '</dd>' : '') +
+      (() => { const ef = emergencyFund(); return ef ? '<dt>Emergency fund</dt><dd><b>' + ef.months.toFixed(1) + ' months</b> of spending</dd>' : ''; })() +
       '<dt class="tot">Should be there now</dt><dd class="tot">' + fmtE(s.now) + '</dd>' + (Math.abs(s.interest) > 0.004 ? '<dt>Interest so far</dt><dd class="pos">' + fmtSigned(s.interest) + '</dd>' : '') + '</dl>';
   } else {
     h += '<div class="recon-diff">' + fmtE(s.contrib) + '</div><dl class="kv"><dt>Transferred in since June, minus withdrawals</dt><dd>' + fmtE(s.contrib) + '</dd><dt>Interest</dt><dd class="mut">enter the Revolut balance to calculate</dd></dl>';
@@ -911,6 +1065,8 @@ function viewSavings(){
   const pace = comp.length ? comp.reduce((s, m) => s + m.planned + m.surplus - m.withdraw, 0) / comp.length : 0;
   h += '<div class="hero"><div style="min-width:0"><div class="eyebrow">Seimos Santaupos · ' + (st.known ? 'expected now' : 'from transfers') + '</div><div class="big">' + fmtE(st.known ? st.now : tl.now) + '</div><div class="sub">' + (st.known ? 'Last confirmed in Revolut ' + esc(String(st.baseWhen).slice(0, 10)) + ': ' + fmtE(st.base) + '.' : 'Sum of every transfer in since June, minus withdrawals. Enter the Revolut balance to see the interest.') + '</div></div>' +
     '<div class="hledger"><div class="hl"><span>Started at (' + shortD(parseYmd(tl.pts[0].date)) + ')</span><b>' + fmtE(tl.start) + '</b></div><div class="hl"><span>Moved in</span><b>+' + fmtE(totIn) + '</b></div><div class="hl"><span>Withdrawn</span><b>−' + fmtE(totOut) + '</b></div><div class="hl"><span>Interest</span><b>' + fmtSigned(totInt) + '</b></div><div class="hl tot"><span>Now</span><b>' + fmtE(tl.now) + '</b></div></div></div>';
+  const ef = emergencyFund();
+  if (ef) h += banner(ef.months >= 6 ? 'good' : ef.months >= 3 ? 'info' : 'warn', 'Emergency fund: ' + ef.months.toFixed(1) + ' months', 'Seimos Santaupos (' + fmtE0(ef.bal) + ') would cover ' + ef.months.toFixed(1) + ' months of your average spending of ' + fmtE0(ef.avg) + ' a month (last ' + ef.n + ' completed months, savings transfers excluded). A common target is 3–6 months.');
   h += '<div class="grid g4">' + kpi('Added per month', fmtE0(pace), 'average of the last ' + comp.length + ' completed months') +
     kpi('In 6 months', '≈ ' + fmtE0(tl.now + pace * 6), 'at that pace') + kpi('In 12 months', '≈ ' + fmtE0(tl.now + pace * 12), 'at that pace') +
     kpi('Interest earned', fmtSigned(totInt), (S.snaps || []).length + ' balance checks', totInt > 0 ? 'pos' : '') + '</div>';
@@ -1201,6 +1357,10 @@ document.addEventListener('click', async e => {
     const prevLen = S.fixed.length + 1; while (rows.length < prevLen) rows.push(['','','','','','','']);
     guardedWrite('fx', async () => { await call('update_values', {spreadsheetId: SHEET, range: "'Fiksuotos islaidos'!A1:G" + rows.length, values: rows}); S.fxDirty = false; S.fx = null; }, 'Fixed costs saved to the sheet'); }
   else if (act === 'ai'){ runAI(); }
+  else if (act === 'editTx'){ openEdit(+t.dataset.row); }
+  else if (act === 'editClose'){ if (e.target === t || t.tagName === 'BUTTON') closeEdit(); }
+  else if (act === 'editType'){ readEdit(); S.edit.type = t.dataset.v; if (t.dataset.v === 'Pajamos' && !INCOME_CATS.includes(S.edit.cat)) S.edit.cat = INCOME_CATS[0]; if (t.dataset.v !== 'Pajamos' && INCOME_CATS.includes(S.edit.cat)) S.edit.cat = 'Maistas'; if (t.dataset.v === 'Pervedimas'){ S.edit.cat = SAVINGS; } renderEdit(); }
+  else if (act === 'editDelete'){ readEdit(); if (!S.edit.confirmDel){ S.edit.confirmDel = true; renderEdit(); return; } deleteEdit(); }
   else if (act === 'openSavings'){ setTab('savings'); }
   else if (act === 'goWithdraw'){ S.wd = {open: true, amount: '', date: ymd(new Date()), note: ''}; setTab('tx'); }
   else if (act === 'wdOpen'){ S.wd = {open: true, amount: '', date: ymd(new Date()), note: ''}; render(); }
@@ -1239,6 +1399,7 @@ document.addEventListener('change', e => {
   else if (e.target.dataset.fx){ readFxInputs(); S.fxDirty = true; if (e.target.dataset.fx === 'active' || e.target.dataset.fx === 'cat') render(); }
 });
 document.addEventListener('submit', e => {
+  if (e.target.id === 'editForm'){ e.preventDefault(); saveEdit(); return; }
   if (e.target.id === 'wdForm'){
     e.preventDefault(); const W = S.wd; W.amount = $('#wdAmt').value; W.date = $('#wdDate').value || ymd(new Date()); W.note = $('#wdNote').value.trim();
     const v = Math.abs(num(W.amount)); if (!(v > 0)){ toast('Enter an amount above zero'); return; }
@@ -1272,6 +1433,7 @@ document.addEventListener('pointermove', e => {
   tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px';
 });
 document.addEventListener('scroll', hideTip, {passive:true});
+document.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches && e.target.matches('.txr.tap')){ e.preventDefault(); openEdit(+e.target.dataset.row); } if (e.key === 'Escape' && S.edit) closeEdit(); });
 let rz; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(afterRender, 150); });
 
 // ---------- Claude review ----------
@@ -1328,7 +1490,7 @@ function startAutoSync(){
   if (autoSyncOn) return; autoSyncOn = true;
   const tick = () => {
     if (document.hidden || !S.bridge || S.status === 'loading' || S.status === 'refreshing' || S.tab === 'settings') return;
-    if (Object.values(S.busy).some(Boolean)) return;
+    if (Object.values(S.busy).some(Boolean) || S.edit) return;
     const a = document.activeElement; if (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     loadAll().catch(() => {});
   };
