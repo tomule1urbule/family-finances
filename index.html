@@ -825,7 +825,7 @@ function aiBlock(){
 function savingsState(){
   const snaps = S.snaps || [], last = snaps.length ? snaps[snaps.length - 1] : null;
   const interest = snaps.reduce((s, x) => s + (x.exp == null ? 0 : x.diff), 0);
-  if (!last){ const m = S.bsheet && S.bsheet.months[curPk()]; return {known: false, sheetH: m ? m.savingsH : null, interest}; }
+  if (!last){ const contrib = S.txns.filter(t => t.cat === SAVINGS).reduce((s, t) => s - t.amt, 0); return {known: false, contrib, interest}; }
   const after = S.txns.filter(t => t.cat === SAVINGS && t.row > last.upto);
   const inS = after.filter(t => t.amt < 0).reduce((s, t) => s - t.amt, 0), outS = after.filter(t => t.amt > 0).reduce((s, t) => s + t.amt, 0);
   return {known: true, base: last.bal, baseWhen: last.when, inS, outS, now: last.bal + inS - outS, interest, after};
@@ -849,7 +849,7 @@ function savingsCard(){
       (s.inS ? '<dt>Moved in since</dt><dd class="pos">+' + fmtE(s.inS) + '</dd>' : '') + (s.outS ? '<dt>Withdrawn since</dt><dd class="neg">−' + fmtE(s.outS) + '</dd>' : '') +
       '<dt class="tot">Should be there now</dt><dd class="tot">' + fmtE(s.now) + '</dd>' + (Math.abs(s.interest) > 0.004 ? '<dt>Interest so far</dt><dd class="pos">' + fmtSigned(s.interest) + '</dd>' : '') + '</dl>';
   } else {
-    h += '<p class="note">Enter today’s balance from the Revolut savings account to start tracking it.' + (s.sheetH != null ? ' Seimos Biudzetas currently shows <b class="num">' + fmtE(s.sheetH) + '</b> for ' + MONTHS[pParts(curPk())[1]-1] + '.' : '') + '</p>';
+    h += '<div class="recon-diff">' + fmtE(s.contrib) + '</div><dl class="kv"><dt>Transferred in since June, minus withdrawals</dt><dd>' + fmtE(s.contrib) + '</dd><dt>Interest</dt><dd class="mut">enter the Revolut balance to calculate</dd></dl>';
   }
   h += '<div class="row"><input class="inp num" id="svBal" inputmode="decimal" placeholder="Balance in Revolut now" style="flex:1;min-width:140px"><button class="btn primary" data-act="saveSnap"' + (S.busy.snap ? ' disabled' : '') + '>' + (S.busy.snap ? 'Saving…' : 'Update balance') + '</button></div>' +
     '<p class="note">Interest makes the real balance drift; updating records the difference as interest and sets column H of Seimos Biudzetas for ' + MONTHS[pParts(curPk())[1]-1] + '.</p>' +
@@ -862,8 +862,10 @@ function savingsTimeline(){
   const snaps = (S.snaps || []).map(x => ({...x, date: normDate(String(x.when).slice(0, 10)) || ymd(new Date())})).sort((a, b) => a.date.localeCompare(b.date));
   let start, est = false;
   const netUpTo = d => moves.filter(t => t.date <= d).reduce((s, t) => s - t.amt, 0);
-  if (snaps.length) start = snaps[0].bal - netUpTo(snaps[0].date);
-  else { const m = S.bsheet && S.bsheet.months[curPk()]; if (!m || m.savingsH == null) return null; start = m.savingsH - netUpTo(ymd(new Date())); est = true; }
+  // An opening balance (a Santaupos row without an expected value) sets the start; real balance checks after it show up as interest.
+  const opening = snaps.find(x => x.exp == null);
+  if (opening) start = opening.bal - netUpTo(opening.date);
+  else { if (!moves.length && !snaps.length) return null; start = 0; est = !snaps.length; }
   const evs = [...moves.map(t => ({date: t.date, kind: t.amt < 0 ? (/perteklius/i.test(t.note) ? 'surplus' : 'planned') : 'withdraw', amt: -t.amt, t})), ...snaps.map(x => ({date: x.date, kind: 'snap', snap: x}))]
     .sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'snap') - (b.kind === 'snap'));
   const first = moves.length ? ymd(pStart(pkFromDate(moves[0].date))) : (snaps[0] ? snaps[0].date : ymd(new Date()));
@@ -907,7 +909,7 @@ function viewSavings(){
   const totOut = tl.evs.filter(e => e.kind === 'withdraw').reduce((s, e) => s - e.amt, 0);
   const totInt = tl.evs.filter(e => e.kind === 'snap').reduce((s, e) => s + e.amt, 0);
   const pace = comp.length ? comp.reduce((s, m) => s + m.planned + m.surplus - m.withdraw, 0) / comp.length : 0;
-  h += '<div class="hero"><div style="min-width:0"><div class="eyebrow">Seimos Santaupos · ' + (st.known ? 'expected now' : 'estimate') + '</div><div class="big">' + fmtE(st.known ? st.now : tl.now) + '</div><div class="sub">' + (st.known ? 'Last confirmed in Revolut ' + esc(String(st.baseWhen).slice(0, 10)) + ': ' + fmtE(st.base) + '.' : 'From column H of Seimos Biudzetas. Confirm the real balance to make this exact.') + '</div></div>' +
+  h += '<div class="hero"><div style="min-width:0"><div class="eyebrow">Seimos Santaupos · ' + (st.known ? 'expected now' : 'from transfers') + '</div><div class="big">' + fmtE(st.known ? st.now : tl.now) + '</div><div class="sub">' + (st.known ? 'Last confirmed in Revolut ' + esc(String(st.baseWhen).slice(0, 10)) + ': ' + fmtE(st.base) + '.' : 'Sum of every transfer in since June, minus withdrawals. Enter the Revolut balance to see the interest.') + '</div></div>' +
     '<div class="hledger"><div class="hl"><span>Started at (' + shortD(parseYmd(tl.pts[0].date)) + ')</span><b>' + fmtE(tl.start) + '</b></div><div class="hl"><span>Moved in</span><b>+' + fmtE(totIn) + '</b></div><div class="hl"><span>Withdrawn</span><b>−' + fmtE(totOut) + '</b></div><div class="hl"><span>Interest &amp; corrections</span><b>' + fmtSigned(totInt) + '</b></div><div class="hl tot"><span>Now</span><b>' + fmtE(tl.now) + '</b></div></div></div>';
   h += '<div class="grid g4">' + kpi('Added per month', fmtE0(pace), 'average of the last ' + comp.length + ' completed months') +
     kpi('In 6 months', '≈ ' + fmtE0(tl.now + pace * 6), 'at that pace') + kpi('In 12 months', '≈ ' + fmtE0(tl.now + pace * 12), 'at that pace') +
@@ -1192,9 +1194,9 @@ document.addEventListener('click', async e => {
   else if (act === 'wdClose'){ S.wd.open = false; render(); }
   else if (act === 'saveSnap'){
     const raw = $('#svBal').value; const bal = num(raw); if (!raw.trim() || bal < 0){ toast('Enter the balance shown in Revolut'); return; }
-    const s = savingsState(), now = new Date(); const exp = s.known ? Math.round(s.now * 100) / 100 : '';
-    const row = [ymd(now) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()), Math.round(bal * 100) / 100, exp, s.known ? Math.round((bal - s.now) * 100) / 100 : '', maxTxRow(), s.known ? '' : 'Pradinis likutis'];
-    guardedWrite('snap', async () => { await appendRowTo('Santaupos', 'F', row); try { await writeSavingsH(bal); } catch(e) {} }, s.known ? 'Savings balance updated · ' + fmtSigned(bal - s.now) + ' vs expected' : 'Savings balance saved'); }
+    const s = savingsState(), now = new Date(), tl = savingsTimeline(); const expected = s.known ? s.now : (tl ? tl.now : s.contrib); const exp = Math.round(expected * 100) / 100;
+    const row = [ymd(now) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()), Math.round(bal * 100) / 100, exp, Math.round((bal - expected) * 100) / 100, maxTxRow(), s.known ? '' : 'Pirmas patikrinimas'];
+    guardedWrite('snap', async () => { await appendRowTo('Santaupos', 'F', row); try { await writeSavingsH(bal); } catch(e) {} }, 'Savings balance saved · interest ' + fmtSigned(bal - expected)); }
   else if (act === 'copyLink'){ const inp = $('#shareLink'); try { await navigator.clipboard.writeText(inp.value); toast('Setup link copied'); } catch(_){ inp.focus(); inp.select(); toast('Link selected — copy it from the menu'); } }
   else if (act === 'disconnect'){ if (t.dataset.confirm !== '1'){ t.dataset.confirm = '1'; t.textContent = 'Tap again to disconnect'; return; } saveBridge(null); S.bridge = null; S.txns = []; S.status = 'setup'; S.tab = 'settings'; render(); paintSync(); }
 });

@@ -1,6 +1,6 @@
 // Caches the app itself so it opens instantly and offline. Sheet data is never cached here:
 // it always comes live from the Google Sheet bridge.
-const CACHE = 'ff-v4';
+const CACHE = 'ff-v5';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {
