@@ -1230,7 +1230,7 @@ paintHeader();
   if (!cl || !cl.use){
     readSetupHash(); S.bridge = loadBridge(); S.sample = null;
     const g = $('#gear'); if (g) g.hidden = false;
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', {updateViaCache: 'none'}).then(r => r.update()).catch(() => {});
     if (!S.bridge){ S.status = 'setup'; S.tab = 'settings'; render(); paintSync(); return; }
     if (S.justLinked) S.tab = 'settings';
     await loadAll(); startAutoSync(); return;

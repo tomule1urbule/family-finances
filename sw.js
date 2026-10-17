@@ -1,6 +1,6 @@
 // Caches the app itself so it opens instantly and offline. Sheet data is never cached here:
 // it always comes live from the Google Sheet bridge.
-const CACHE = 'ff-v2';
+const CACHE = 'ff-v3';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -14,7 +14,7 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.origin !== location.origin) return; // bridge, fonts: straight to network
   // Network first so new versions arrive right away; cached copy when offline.
   e.respondWith(
-    fetch(e.request).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })
+    fetch(e.request, {cache: 'no-cache'}).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })
       .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
   );
 });
