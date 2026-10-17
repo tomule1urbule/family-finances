@@ -982,12 +982,24 @@ function budSections(){
   GROUPS.forEach(g => secs.push({id: g.id, name: g.name, color: g.color, cols: cols.filter(c => c.kind === 'exp' && groupOf(c.cat) === g.id && (CAT2G[c.cat] || g.id === 'buf'))}));
   return secs.filter(s => s.cols.length);
 }
+// For the current month each line counts as the higher of plan and actual: income already received above plan,
+// and spending already above budget, are real. This matches the projection on the Current situation tab.
 function budTotals(){
-  const B = S.bsheet, d = S.bud.draft; let inc = 0, exp = 0, sav = 0; const grp = {};
-  B.cols.forEach(c => { const v = num(d[c.cat]); if (c.kind === 'inc') inc += v; else if (c.kind === 'sav') sav += v; else { exp += v; const g = groupOf(c.cat); grp[g] = (grp[g]||0) + v; } });
-  return {inc, exp, sav, surplus: inc - exp, unal: inc - exp - sav, grp};
+  const B = S.bsheet, d = S.bud.draft, pk = S.bud.pk, live = pk === curPk();
+  let inc = 0, exp = 0, sav = 0, pInc = 0, pExp = 0, pSav = 0; const grp = {};
+  B.cols.forEach(c => { const plan = num(d[c.cat]), v = live ? Math.max(plan, budActual(pk, c)) : plan;
+    if (c.kind === 'inc'){ inc += v; pInc += plan; } else if (c.kind === 'sav'){ sav += v; pSav += plan; } else { exp += v; pExp += plan; const g = groupOf(c.cat); grp[g] = (grp[g]||0) + plan; } });
+  return {inc, exp, sav, surplus: inc - exp, unal: inc - exp - sav, grp, live, pInc, pExp, pSav, planUnal: pInc - pExp - pSav};
 }
-function unalPill(u){ return Math.abs(u) < 1 ? '<span class="pill good">✓ Every euro planned</span>' : u > 0 ? '<span class="pill">' + fmtE(u) + ' not planned · becomes month-end surplus</span>' : '<span class="pill crit">! ' + fmtE(-u) + ' more planned than income</span>'; }
+function incSub(T, a){ return T.live ? 'plan ' + fmtE0(T.pInc) + ' · ' + fmtE0(a.income) + ' received' : 'from Seimos Biudzetas'; }
+function expSub(T, a){ return T.live ? 'budget ' + fmtE0(T.pExp) + ' · ' + fmtE0(a.spend) + ' spent so far' : 'excl. savings transfer'; }
+function unalPill(u, T){
+  const live = T && T.live;
+  if (Math.abs(u) < 1) return '<span class="pill good">✓ Every euro planned</span>';
+  return u > 0 ? '<span class="pill">' + (live ? 'Left over after the transfer: ' : '') + fmtE(u) + (live ? ' · moves to savings on the 10th' : ' not planned · becomes month-end surplus') + '</span>'
+               : '<span class="pill crit">! ' + fmtE(-u) + (live ? ' short after the transfer' : ' more planned than income') + '</span>';
+}
+function _unalPillOld(u){ return Math.abs(u) < 1 ? '<span class="pill good">✓ Every euro planned</span>' : u > 0 ? '<span class="pill">' + fmtE(u) + ' not planned · becomes month-end surplus</span>' : '<span class="pill crit">! ' + fmtE(-u) + ' more planned than income</span>'; }
 function viewBudget(){
   const cur = curPk(), next = pShift(cur, 1);
   if (!S.bud.pk) S.bud.pk = cur;
@@ -1002,11 +1014,11 @@ function viewBudget(){
   const avgOf = col => comp.length ? comp.reduce((s,p) => s + budActual(p, col), 0) / comp.length : 0;
   if (!m.filled && !S.bud.dirty) h += banner('info', pLabel(pk) + ' has no spending plan yet', 'Start from last month’s numbers or your 3-month average, then adjust. Income and the savings transfer are already filled in from the sheet.', '<button class="btn primary sm" data-act="budCopy">Copy ' + MONTHS[pParts(pShift(pk,-1))[1]-1] + ' budget</button><button class="btn sm" data-act="budAvg">Use 3-month average</button>');
   h += '<div class="grid g4">' +
-    kpi('Planned income', '<span id="bInc">' + fmtE0(T.inc) + '</span>', isCur ? fmtE0(a.income) + ' received so far' : 'from Seimos Biudzetas') +
-    kpi('Planned spending', '<span id="bExp">' + fmtE0(T.exp) + '</span>', isCur ? fmtE0(a.spend) + ' spent so far' : 'excl. savings transfer') +
-    kpi('Planned surplus', '<span id="bSur">' + fmtE0(T.surplus) + '</span>', '<span id="bRate">' + (T.inc ? Math.round(T.surplus / T.inc * 100) + '% of income' : '') + '</span>') +
-    kpi('To Seimos Santaupos', '<span id="bSav">' + fmtE0(T.sav) + '</span>', 'on the 10th, plus whatever is left') + '</div>';
-  h += '<div class="row" id="bUnal">' + unalPill(T.unal) + '</div>';
+    kpi(isCur ? 'Income' : 'Planned income', '<span id="bInc">' + fmtE0(T.inc) + '</span>', '<span id="bIncS">' + incSub(T, a) + '</span>') +
+    kpi(isCur ? 'Spending' : 'Planned spending', '<span id="bExp">' + fmtE0(T.exp) + '</span>', '<span id="bExpS">' + expSub(T, a) + '</span>') +
+    kpi('Total saving', '<span id="bSur">' + fmtE0(T.surplus) + '</span>', '<span id="bRate">' + (T.inc ? Math.round(T.surplus / T.inc * 100) + '% of income · income − spending' : '') + '</span>') +
+    kpi('To Seimos Santaupos', '<span id="bSav">' + fmtE0(T.sav) + '</span>', 'planned transfer on the 10th') + '</div>';
+  h += '<div class="row" id="bUnal">' + unalPill(T.unal, T) + (T.live && Math.abs(T.planUnal - T.unal) > 1 ? '<span class="note">Plan alone: ' + fmtSigned(T.planUnal) + '. Counts income already received and spending already over budget.</span>' : '') + '</div>';
   h += '<div class="card"><div class="card-h"><h2>' + esc(pLabel(pk)) + ' budget</h2><div class="row"><button class="btn ghost sm" data-act="budCopy">Copy ' + MON3[pParts(pShift(pk,-1))[1]-1] + '</button><button class="btn ghost sm" data-act="budAvg">3-mo average</button><button class="btn ghost sm" data-act="budFixed">Cover fixed costs</button></div></div>';
   h += '<div class="tscroll"><table class="t bt"><thead><tr><th>Category</th><th class="r">Budget €</th>' + (isCur ? '<th class="r">Actual</th><th class="r">Left</th>' : '<th class="r">' + MON3[pParts(prev)[1]-1] + ' actual</th><th class="r">3-mo avg</th>') + '</tr></thead><tbody>';
   for (const s of budSections()){
@@ -1028,7 +1040,8 @@ function updateBudgetLive(){
   const T = budTotals(), pk = S.bud.pk, isCur = pk === curPk(), fx = fixedByCat();
   const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
   set('bInc', fmtE0(T.inc)); set('bExp', fmtE0(T.exp)); set('bSur', fmtE0(T.surplus)); set('bSav', fmtE0(T.sav)); set('bRate', T.inc ? Math.round(T.surplus / T.inc * 100) + '% of income' : '');
-  const u = document.getElementById('bUnal'); if (u) u.innerHTML = unalPill(T.unal);
+  const u = document.getElementById('bUnal'); if (u) u.innerHTML = unalPill(T.unal, T) + (T.live && Math.abs(T.planUnal - T.unal) > 1 ? '<span class="note">Plan alone: ' + fmtSigned(T.planUnal) + '. Counts income already received and spending already over budget.</span>' : '');
+  const a = agg(pk); set('bIncS', incSub(T, a)); set('bExpS', expSub(T, a));
   budSections().forEach(s => set('bg-' + s.id, fmtE0(s.cols.reduce((x,c) => x + num(S.bud.draft[c.cat]), 0))));
   S.bsheet.cols.forEach((c, i) => {
     const v = num(S.bud.draft[c.cat]);
