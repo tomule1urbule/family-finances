@@ -392,7 +392,7 @@ async function loadAll(){
   S.status = S.txns.length ? 'refreshing' : 'loading'; S.err = null; paintSync();
   const [tx, fx, rc, cats, bs, sv] = await Promise.allSettled([
     getValues('Transakcijos!A1:G5000'),
-    getValues("'Fiksuotos islaidos'!A1:G100"),
+    getValues("'Fiksuotos islaidos'!A1:H100"),
     getValues('Rekonsiliacija!A1:H1000'),
     getValues('Kategorijos!L1:M80'),
     getValues("'Seimos Biudzetas'!A1:AZ80"),
@@ -445,8 +445,10 @@ function parseTx(rows){
   return out;
 }
 function parseFixed(rows){
-  return rows.slice(1).filter(r => r && r[3]).map((r, i) => ({id: r[0] || ('fx' + (i+1)), active: String(r[1]).toUpperCase() !== 'FALSE', type: r[2] || 'Islaidos', cat: r[3], amount: Math.abs(num(r[4])), vendor: r[5] || '', note: r[6] || ''}));
+  return rows.slice(1).filter(r => r && r[3]).map((r, i) => ({id: r[0] || ('fx' + (i+1)), active: String(r[1]).toUpperCase() !== 'FALSE', type: r[2] || 'Islaidos', cat: r[3], amount: Math.abs(num(r[4])), vendor: r[5] || '', note: r[6] || '', payer: normPayer(r[7], r[3])}));
 }
+const PAYERS = [['Tomas', 'Dad (Tomas)'], ['Ieva', 'Mom (Ieva)'], ['Seima', 'Family account']];
+function normPayer(v, cat){ const x = String(v || '').trim().toLowerCase(); if (x.startsWith('tom')) return 'Tomas'; if (x.startsWith('iev')) return 'Ieva'; if (x) return 'Seima'; return /^Tomo/.test(cat) ? 'Tomas' : /^Ievos/.test(cat) ? 'Ieva' : 'Seima'; }
 function parseRecon(rows){
   return rows.slice(1).filter(r => r && r[0]).map(r => ({when: r[0], pk: pkFromLabel(r[1]) || null, revolut: num(r[2]), cash: num(r[3]), total: num(r[4]), book: num(r[5]), diff: num(r[6]), note: r[7] || ''}));
 }
@@ -608,7 +610,7 @@ function viewNow(){
     (isCur && proj ? kpi('Total saving this month', '≈ ' + fmtE0(proj.projSurplus), (proj.projIncome ? Math.round(proj.projSurplus / proj.projIncome * 100) + '% of income · ' : '') + fmtE0(a.savings) + ' moved + ≈' + fmtE0(Math.max(0, proj.projNet)) + ' left over', proj.projSurplus < 0 ? 'neg' : '')
                    : kpi('Total saved', fmtE0(a.surplus), a.income ? Math.round(a.surplus / a.income * 100) + '% of income' : '', a.surplus < 0 ? 'neg' : '')) + '</div>';
   h += '<div class="split"><div class="card"><div class="card-h"><h2>Budget vs actual</h2><p>' + budgetSrc(pk) + ' · tap a group to drill in</p></div>' + groupBars(pk) + '</div>';
-  h += '<div style="display:flex;flex-direction:column;gap:16px;min-width:0">' + savingsCard() + reconCard(pk, a) + recentCard(pk) + '</div></div>';
+  h += '<div style="display:flex;flex-direction:column;gap:16px;min-width:0">' + transferCard(pk) + savingsCard() + reconCard(pk, a) + recentCard(pk) + '</div></div>';
   return h;
 }
 // Hero: a short ledger that walks from income to "left over", so every number on it is explained by the line above it.
@@ -891,6 +893,33 @@ function insights(){
 function aiBlock(){
   if (!S.sample) return '';
   return '<div style="border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:10px"><div class="row"><button class="btn" data-act="ai"' + (S.ai.busy ? ' disabled' : '') + '>' + (S.ai.busy ? 'Claude is reading your numbers…' : 'Ask Claude for a deeper review') + '</button><span class="note">Uses your Claude account</span></div>' + (S.ai.text ? '<div class="ai-out" id="aiOut">' + esc(S.ai.text) + '</div>' : '') + (S.ai.err ? '<p class="note neg">' + esc(S.ai.err) + '</p>' : '') + '</div>';
+}
+
+// ----- Monthly transfers from Dad's and Mom's own accounts to the family account -----
+// Each salary lands in its owner's account; the fixed costs marked as paid from that account (incl. the personal allowance)
+// stay there, the rest is transferred to the family account. Before the salary arrives the budgeted amount is used.
+function transferPlan(pk){
+  const fx = (S.fx || S.fixed).filter(f => f.active && f.type !== 'Pajamos');
+  const a = agg(pk), b = budgetFor(pk), bm = b && b.src === pk ? b.map : (b ? b.map : {});
+  const one = (payer, incCat, label) => {
+    const items = fx.filter(f => f.payer === payer), keep = items.reduce((s, f) => s + f.amount, 0);
+    const got = a.incByCat[incCat] || 0, plan = bm[incCat] || 0, income = got > 0.004 ? got : plan;
+    const pays = S.txns.filter(t => t.pk === pk && t.cat === incCat && t.amt > 0).length;
+    return {payer, label, incCat, items, keep, income, got, plan, fromPlan: !(got > 0.004), pays, transfer: income - keep};
+  };
+  return [one('Tomas', 'Tecio Pinigai', 'Dad'), one('Ieva', 'Mamos Pinigai', 'Mom')];
+}
+function transferCard(pk){
+  const plans = transferPlan(pk), open = S.openTransfer;
+  let h = '<div class="card"><div class="card-h"><h2>Transfer to the family account</h2><p>' + esc(pLabel(pk)) + '</p></div><div class="bars">';
+  plans.forEach(p => {
+    const id = 'tr-' + p.payer, isOpen = open === p.payer;
+    h += '<button class="brow" data-act="toggleTransfer" data-v="' + p.payer + '" aria-expanded="' + isOpen + '"><span class="bname"><span class="t"><b>' + p.label + '</b> <span class="mut" style="font-weight:400">(' + esc(p.incCat) + ')</span></span></span><span class="bval" style="font-size:1.05rem"><b class="' + (p.transfer < 0 ? 'neg' : '') + '">' + fmtE(p.transfer) + '</b></span>' +
+      '<span style="grid-column:1/-1;font-size:.78rem;color:var(--muted)">' + fmtE(p.income) + (p.fromPlan ? ' planned (not received yet)' : ' received' + (p.pays > 1 ? ' in ' + p.pays + ' payments' : '')) + ' − ' + fmtE(p.keep) + ' kept for own fixed costs</span></button>';
+    if (isOpen) h += '<div class="sub-rows" id="' + id + '">' + p.items.map(f => '<div class="subr" style="cursor:default"><span>' + esc(f.cat) + ' <span class="mut" style="font-size:.75rem">' + esc(f.vendor) + '</span></span><span class="bval">' + fmtE(f.amount) + '</span></div>').join('') +
+      '<div class="subr" style="cursor:default;font-weight:600"><span>Stays in ' + (p.payer === 'Tomas' ? 'Dad’s' : 'Mom’s') + ' account</span><span class="bval">' + fmtE(p.keep) + '</span></div></div>';
+  });
+  return h + '</div><p class="note">Uses the fixed costs marked “Paid from” Dad or Mom in the Fixed costs tab, so it updates when you change them. Tap a line for the breakdown.</p></div>';
 }
 
 // ----- Emergency fund: how many months of normal spending the savings would cover -----
@@ -1241,17 +1270,19 @@ function viewFixed(){
   const nextRun = pStart(pShift(cur, 1));
   let h = '<div class="grid g3">' + kpi('Fixed costs each 10th', fmtE(tot), (trf ? '+ ' + fmtE(trf) + ' transfer to Seimos Santaupos' : fx.filter(f => f.active).length + ' active items')) + kpi('Recorded for ' + MONTHS[pParts(cur)[1]-1], st.filter(r => r.tx).length + ' / ' + st.length, st.every(r => r.tx) ? 'all posted' : 'some missing', st.every(r => r.tx) ? 'pos' : 'neg') + kpi('Next automatic run', shortD(nextRun) + ' 07:50', 'adds the rows to Transakcijos') + '</div>';
   if (!S.fixedLoaded) h += banner('warn', 'Could not read the Fiksuotos islaidos tab', 'Tap Refresh. Changes here are saved to that tab in your sheet.');
-  h += '<div class="card"><div class="card-h"><h2>Fixed costs</h2><p>Saved in the “Fiksuotos islaidos” tab · posted on the 10th, dated the 10th</p></div><div class="tscroll"><table class="t"><thead><tr><th>On</th><th>Category</th><th>Vendor</th><th class="r">Amount €</th><th>Comment</th><th>' + MON3[pParts(cur)[1]-1] + '</th><th></th></tr></thead><tbody>';
+  h += '<div class="card"><div class="card-h"><h2>Fixed costs</h2><p>Saved in the “Fiksuotos islaidos” tab · posted on the 10th, dated the 10th</p></div><div class="tscroll"><table class="t"><thead><tr><th>On</th><th>Category</th><th>Vendor</th><th>Paid from</th><th class="r">Amount €</th><th>Comment</th><th>' + MON3[pParts(cur)[1]-1] + '</th><th></th></tr></thead><tbody>';
   fx.forEach((f, i) => { const s = st.find(r => r.f.id === f.id && f.active);
     h += '<tr class="' + (f.active ? '' : 'off') + '"><td><input type="checkbox" id="fxA' + i + '" data-fx="active" data-i="' + i + '"' + (f.active ? ' checked' : '') + ' aria-label="Active"></td>' +
       '<td><select class="inp" id="fxC' + i + '" data-fx="cat" data-i="' + i + '" style="min-width:150px">' + allCats.map(c => '<option' + (f.cat === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></td>' +
       '<td><input class="inp" id="fxV' + i + '" data-fx="vendor" data-i="' + i + '" value="' + esc(f.vendor) + '" style="min-width:120px"></td>' +
+      '<td><select class="inp" id="fxP' + i + '" data-fx="payer" data-i="' + i + '" style="min-width:120px">' + PAYERS.map(([v, l]) => '<option value="' + v + '"' + (f.payer === v ? ' selected' : '') + '>' + l + '</option>').join('') + '</select></td>' +
       '<td class="r"><input class="inp num" id="fxM' + i + '" data-fx="amount" data-i="' + i + '" inputmode="decimal" value="' + f.amount.toFixed(2) + '" style="width:96px;text-align:right"></td>' +
       '<td><input class="inp" id="fxN' + i + '" data-fx="note" data-i="' + i + '" value="' + esc(f.note) + '" style="min-width:90px"></td>' +
       '<td>' + (!f.active ? '<span class="pill">off</span>' : s && s.tx ? '<span class="pill good" title="' + esc(fmtE(s.tx.amt)) + '">✓ ' + shortD(parseYmd(s.tx.date)) + '</span>' : '<span class="pill warn">! missing</span>') + '</td>' +
       '<td><button class="btn ghost sm" data-act="fxDel" data-i="' + i + '" aria-label="Remove">✕</button></td></tr>'; });
   h += '</tbody></table></div><div class="row"><button class="btn sm" data-act="fxAdd">+ Add fixed cost</button><span class="spacer"></span>' + (S.fxDirty ? '<span class="pill warn">Unsaved changes</span><button class="btn ghost sm" data-act="fxReset">Discard</button>' : '') + '<button class="btn primary" data-act="fxSave"' + (!S.fxDirty || S.busy.fx ? ' disabled' : '') + '>' + (S.busy.fx ? 'Saving…' : 'Save to sheet') + '</button></div>';
   h += '<p class="note">Changing an amount applies from the next 10th. To fix a cost already recorded this month, edit that row in Transakcijos. Turning an item off keeps it here for later.</p></div>';
+  h += transferCard(cur);
   const missing = st.filter(r => !r.tx);
   if (missing.length) h += pendingBlock();
   return h;
@@ -1349,14 +1380,15 @@ document.addEventListener('click', async e => {
     const book = S.reconBasis === 'all' ? S.txns.reduce((s,t) => s + t.amt, 0) : agg(curPk()).net; const now = new Date();
     const row = [ymd(now) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()), pSheetLabel(curPk()), rv, cs, Math.round((rv+cs)*100)/100, Math.round(book*100)/100, Math.round((rv+cs-book)*100)/100, ($('#rcNote').value || '') + (S.reconBasis === 'all' ? ' [all-time]' : '')];
     guardedWrite('recon', async () => { if (S.bridge){ await call('append_row', {sheet:'Rekonsiliacija', values: row}); return; } const a = await getValues('Rekonsiliacija!A1:A2000'); const r = Math.max(2, a.length + 1); await call('update_values', {spreadsheetId: SHEET, range: 'Rekonsiliacija!A' + r + ':H' + r, values: [row]}); }, 'Check saved to the Rekonsiliacija tab'); }
-  else if (act === 'fxAdd'){ readFxInputs(); S.fx.push({id: 'fx' + Date.now().toString(36), active: true, type: 'Islaidos', cat: 'Komunaliniai', amount: 0, vendor: '', note: ''}); S.fxDirty = true; render(); }
+  else if (act === 'fxAdd'){ readFxInputs(); S.fx.push({id: 'fx' + Date.now().toString(36), active: true, type: 'Islaidos', cat: 'Komunaliniai', amount: 0, vendor: '', note: '', payer: 'Seima'}); S.fxDirty = true; render(); }
   else if (act === 'fxDel'){ readFxInputs(); S.fx.splice(+t.dataset.i, 1); S.fxDirty = true; render(); }
   else if (act === 'fxReset'){ S.fx = null; S.fxDirty = false; render(); }
   else if (act === 'fxSave'){ readFxInputs(); const bad = S.fx.find(f => !(f.amount > 0) || !f.vendor.trim()); if (bad){ toast('Every fixed cost needs a vendor and an amount above zero'); return; }
-    const rows = [['ID','Aktyvus','Tipas','Kategorija','Suma','Vendorius','Komentarai'], ...S.fx.map(f => [f.id, !!f.active, INCOME_CATS.includes(f.cat) ? 'Pajamos' : 'Islaidos', f.cat, Math.round(f.amount*100)/100, f.vendor.trim(), f.note || ''])];
-    const prevLen = S.fixed.length + 1; while (rows.length < prevLen) rows.push(['','','','','','','']);
-    guardedWrite('fx', async () => { await call('update_values', {spreadsheetId: SHEET, range: "'Fiksuotos islaidos'!A1:G" + rows.length, values: rows}); S.fxDirty = false; S.fx = null; }, 'Fixed costs saved to the sheet'); }
+    const rows = [['ID','Aktyvus','Tipas','Kategorija','Suma','Vendorius','Komentarai','Moketojas'], ...S.fx.map(f => [f.id, !!f.active, INCOME_CATS.includes(f.cat) ? 'Pajamos' : 'Islaidos', f.cat, Math.round(f.amount*100)/100, f.vendor.trim(), f.note || '', f.payer || 'Seima'])];
+    const prevLen = S.fixed.length + 1; while (rows.length < prevLen) rows.push(['','','','','','','','']);
+    guardedWrite('fx', async () => { await call('update_values', {spreadsheetId: SHEET, range: "'Fiksuotos islaidos'!A1:H" + rows.length, values: rows}); S.fxDirty = false; S.fx = null; }, 'Fixed costs saved to the sheet'); }
   else if (act === 'ai'){ runAI(); }
+  else if (act === 'toggleTransfer'){ S.openTransfer = S.openTransfer === t.dataset.v ? null : t.dataset.v; render(); }
   else if (act === 'editTx'){ openEdit(+t.dataset.row); }
   else if (act === 'editClose'){ if (e.target === t || t.tagName === 'BUTTON') closeEdit(); }
   else if (act === 'editType'){ readEdit(); S.edit.type = t.dataset.v; if (t.dataset.v === 'Pajamos' && !INCOME_CATS.includes(S.edit.cat)) S.edit.cat = INCOME_CATS[0]; if (t.dataset.v !== 'Pajamos' && INCOME_CATS.includes(S.edit.cat)) S.edit.cat = 'Maistas'; if (t.dataset.v === 'Pervedimas'){ S.edit.cat = SAVINGS; } renderEdit(); }
@@ -1396,7 +1428,7 @@ document.addEventListener('change', e => {
   else if (id === 'fPk'){ S.txf.pk = e.target.value; render(); }
   else if (id === 'fCat'){ S.txf.cat = e.target.value; render(); }
   else if (id === 'fType'){ S.txf.type = e.target.value; render(); }
-  else if (e.target.dataset.fx){ readFxInputs(); S.fxDirty = true; if (e.target.dataset.fx === 'active' || e.target.dataset.fx === 'cat') render(); }
+  else if (e.target.dataset.fx){ readFxInputs(); S.fxDirty = true; if (['active','cat','payer','amount'].includes(e.target.dataset.fx)) render(); }
 });
 document.addEventListener('submit', e => {
   if (e.target.id === 'editForm'){ e.preventDefault(); saveEdit(); return; }
