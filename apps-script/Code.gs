@@ -157,32 +157,44 @@ function guessCategory_(vendor) {
   let best = '', bn = 0; Object.keys(count).forEach(c => { if (count[c] > bn) { best = c; bn = count[c]; } });
   return best;
 }
+// Only card payments / purchases become pending transactions. Everything else Revolut sends
+// (referral bonuses, offers, transfers received, top-ups, savings moves) is skipped and logged.
+const EXPENSE_WORDS = /\b(paid|spent|payment|purchase|charged|declined)\b|apmok[eė]j|sumok[eė]j|i[sš]leid|mok[eė]jim|pirkin|nura[sš]yt/i;
+const EXPENSE_SHAPE = /(?:€|EUR)\s*\d[\d.,]*\s+(?:at|pas)\s+\S|\d[\d.,]*\s*(?:€|EUR)\s+(?:at|pas)\s+\S/i;
+const NOT_EXPENSE = /bonus|premij|referr|refer a|invite|friend|draug|pakviesk|earn|u[zž]dirb|reward|win\b|laim[eė]|offer|pasi[uū]lym|promo|akcij|up to|iki\s*(?:€|\d)|get\s*(?:€|\d)|gauk|gauti|received|gavai|gavote|gauta|sent you|atsiunt|top.?up|papild|refund|gr[aą][zž]in|returned|savings|taupym|vault|instant access|exchanged|keitimas|pocket|declined|atmest/i;
 function ingest_(input) {
   const title = String(input.title || '').trim(), text = String(input.text || '').trim();
   const all = (title + ' ' + text).trim();
-  if (!all) return { status: 'skipped', reason: 'empty' };
-  // Moves between own Revolut pockets/savings are recorded by the family themselves.
-  if (/savings|taupym|vault|instant access|exchanged|keitimas|pocket/i.test(all)) return { status: 'skipped', reason: 'own transfer' };
+  if (!all) return logNotif_(all, 'skipped: empty');
+  if (NOT_EXPENSE.test(all)) return logNotif_(all, 'skipped: not an expense');
+  if (!EXPENSE_WORDS.test(all) && !EXPENSE_SHAPE.test(all)) return logNotif_(all, 'skipped: no payment wording');
   const amt = parseAmount_(all);
-  if (amt === null || amt === 0) return { status: 'skipped', reason: 'no amount' };
+  if (amt === null || amt === 0) return logNotif_(all, 'skipped: no amount');
   const sh = pendingSheet_();
   // MacroDroid can fire twice for one notification: skip an identical one from the last 3 minutes.
   const last = lastRowInCol_(sh, 1), now = new Date();
   if (last >= 2) {
     const recent = sh.getRange(Math.max(2, last - 10), 1, Math.min(11, last - 1), 9).getValues();
-    if (recent.some(r => r[8] === all && r[1] instanceof Date && now - r[1] < 180000)) return { status: 'skipped', reason: 'duplicate notification' };
+    if (recent.some(r => r[8] === all && r[1] instanceof Date && now - r[1] < 180000)) return logNotif_(all, 'skipped: duplicate notification');
   }
-  const income = /received|gavai|gavote|gauta|sent you|atsiuntė|top.?up|papild|refund|grąžin|grazin/i.test(all);
-  const refund = /refund|grąžin|grazin|returned/i.test(all);
   const vendor = guessVendor_(title, text);
-  const cat = income ? (refund ? '' : 'Kitos pajamos') : guessCategory_(vendor);
+  const cat = guessCategory_(vendor);
   const id = 'p' + now.getTime().toString(36);
   const row = last + 1;
-  sh.getRange(row, 1, 1, 10).setValues([[id, now, todaySerial_(), income ? 'Pajamos' : 'Islaidos', cat, amt, '', vendor, all, refund ? 'refund' : '']]);
+  sh.getRange(row, 1, 1, 10).setValues([[id, now, todaySerial_(), 'Islaidos', cat, amt, '', vendor, all, '']]);
   sh.getRange(row, 2).setNumberFormat('yyyy-mm-dd hh:mm');
   sh.getRange(row, 3).setNumberFormat('yyyy-mm-dd');
   sh.getRange(row, 6).setNumberFormat('[$€]#,##0.00');
+  logNotif_(all, 'added ' + amt + (vendor ? ' · ' + vendor : ''));
   return { status: 'success', id: id, amount: amt, vendor: vendor, category: cat };
+}
+// Keeps the last 200 Revolut notifications with what happened to them, so the filter can be tuned.
+function logNotif_(text, result) {
+  const ss = ss_(); let sh = ss.getSheetByName('Pranesimai');
+  if (!sh) { sh = ss.insertSheet('Pranesimai'); sh.getRange(1, 1, 1, 3).setValues([['Gauta', 'Pranesimas', 'Rezultatas']]).setFontWeight('bold'); sh.setFrozenRows(1); }
+  sh.insertRowAfter(1); sh.getRange(2, 1, 1, 3).setValues([[new Date(), text, result]]); sh.getRange(2, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  const n = sh.getLastRow(); if (n > 201) sh.deleteRows(202, n - 201);
+  return { status: result.indexOf('skipped') === 0 ? 'skipped' : 'success', reason: result };
 }
 function findPending_(sh, id) {
   const last = lastRowInCol_(sh, 1); if (last < 2) return 0;
