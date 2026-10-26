@@ -140,11 +140,16 @@ function parseAmount_(s) {
   const n = parseFloat(t);
   return isNaN(n) ? null : Math.abs(n);
 }
+// MacroDroid sends a variable name like [not_title] literally when it was typed instead of picked.
+function cleanMagic_(s) { return String(s || '').replace(/\[[a-z_]+\]|\{[a-z_]+\}/gi, ' ').replace(/\s+/g, ' ').trim(); }
 function guessVendor_(title, text) {
+  // Revolut titles look like "Joint · Eurovaistinė" (account · merchant): take the part after the dot.
+  const tp = String(title || '').split(/\s*[·•|]\s*/).map(x => x.trim()).filter(Boolean);
+  if (tp.length > 1 && !/€|\d/.test(tp[tp.length - 1])) return tp[tp.length - 1];
   const m = text.match(/\b(?:at|pas|in|to|from|iš|is)\s+([^,.\n€]+?)(?:\s+(?:with|using|card|kortel)|[,.\n]|$)/i);
   if (m && m[1].trim().length > 1) return m[1].trim();
   const t = String(title || '').trim();
-  if (t && !/^revolut$/i.test(t) && !/€|\d/.test(t)) return t;
+  if (t && !/^(revolut|joint|personal|bendr\S*)$/i.test(t) && !/€|\d/.test(t)) return t;
   return '';
 }
 function guessCategory_(vendor) {
@@ -163,7 +168,7 @@ const EXPENSE_WORDS = /\b(paid|spent|payment|purchase|charged|declined)\b|apmok[
 const EXPENSE_SHAPE = /(?:€|EUR)\s*\d[\d.,]*\s+(?:at|pas)\s+\S|\d[\d.,]*\s*(?:€|EUR)\s+(?:at|pas)\s+\S/i;
 const NOT_EXPENSE = /bonus|premij|referr|refer a|invite|friend|draug|pakviesk|earn|u[zž]dirb|reward|win\b|laim[eė]|offer|pasi[uū]lym|promo|akcij|up to|iki\s*(?:€|\d)|get\s*(?:€|\d)|gauk|gauti|received|gavai|gavote|gauta|sent you|atsiunt|top.?up|papild|refund|gr[aą][zž]in|returned|savings|taupym|vault|instant access|exchanged|keitimas|pocket|declined|atmest/i;
 function ingest_(input) {
-  const title = String(input.title || '').trim(), text = String(input.text || '').trim();
+  const title = cleanMagic_(input.title), text = cleanMagic_(input.text);
   const all = (title + ' ' + text).trim();
   if (!all) return logNotif_(all, 'skipped: empty');
   if (NOT_EXPENSE.test(all)) return logNotif_(all, 'skipped: not an expense');
