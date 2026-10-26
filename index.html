@@ -258,6 +258,7 @@ table.t tr.off td{opacity:.55}
     <nav class="tabs" role="tablist" id="tabs">
       <button role="tab" data-tab="now" aria-selected="true">Current situation</button>
       <button role="tab" data-tab="add" aria-selected="false">Add transaction</button>
+      <button role="tab" data-tab="pending" aria-selected="false">Pending</button>
       <button role="tab" data-tab="budget" aria-selected="false">Budget</button>
       <button role="tab" data-tab="analytics" aria-selected="false">Analytics</button>
       <button role="tab" data-tab="tx" aria-selected="false">Transactions</button>
@@ -390,13 +391,14 @@ const getValues = range => call('get_values', {spreadsheetId: SHEET, range}).the
 
 async function loadAll(){
   S.status = S.txns.length ? 'refreshing' : 'loading'; S.err = null; paintSync();
-  const [tx, fx, rc, cats, bs, sv] = await Promise.allSettled([
+  const [tx, fx, rc, cats, bs, sv, pd] = await Promise.allSettled([
     getValues('Transakcijos!A1:G5000'),
     getValues("'Fiksuotos islaidos'!A1:H100"),
     getValues('Rekonsiliacija!A1:H1000'),
     getValues('Kategorijos!L1:M80'),
     getValues("'Seimos Biudzetas'!A1:AZ80"),
     getValues('Santaupos!A1:F1000'),
+    getValues("'Laukiancios'!A1:J500"),
   ]);
   if (tx.status === 'rejected'){ S.status = 'error'; S.err = tx.reason; render(); paintSync(); return; }
   S.txns = parseTx(tx.value);
@@ -405,6 +407,7 @@ async function loadAll(){
   if (cats.status === 'fulfilled') S.catList = cats.value.filter(r => r[0] && r[1] && r[0] !== 'Tipas').map(r => ({type:r[0], cat:r[1]}));
   if (bs.status === 'fulfilled'){ S.bsheet = parseBudgetSheet(bs.value); S.bsheetErr = null; if (!S.bud.dirty) S.bud.draft = null; }
   else S.bsheetErr = bs.reason;
+  if (pd.status === 'fulfilled'){ S.pending = parsePending(pd.value); S.pendingErr = null; } else { S.pending = S.pending || []; S.pendingErr = pd.reason; }
   if (sv.status === 'fulfilled'){ S.snaps = sv.value.slice(1).filter(r => r && r[0] && r[1] !== undefined && r[1] !== '').map(r => ({when: r[0], bal: num(r[1]), exp: r[2] === '' || r[2] === undefined ? null : num(r[2]), diff: num(r[3]), upto: parseInt(r[4], 10) || 0, note: r[5] || ''})); S.snapsErr = null; }
   else S.snapsErr = sv.reason;
   S.status = 'ready'; S.lastSync = new Date();
@@ -565,6 +568,7 @@ function paintHeader(){
   $('#pNext').style.opacity = S.pk >= curPk() ? .35 : 1;
   document.querySelectorAll('#tabs button').forEach(b => {
     b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
+    if (b.dataset.tab === 'pending'){ const n = (S.pending || []).length; b.innerHTML = 'Pending' + (n ? '<span class="dot" style="background:var(--accent)">' + n + '</span>' : ''); }
     if (b.dataset.tab === 'now'){ const n = pendingCount(); b.innerHTML = 'Current situation' + (n ? '<span class="dot">' + n + '</span>' : ''); }
   });
 }
@@ -582,7 +586,7 @@ function render(){
   if (S.status === 'error' && !S.txns.length){ m.innerHTML = stateView(errCopy(S.err)); return; }
   if (S.status === 'loading' && !S.txns.length) return;
   const keepScroll = window.scrollY;
-  const views = {savings: viewSavings, now: viewNow, add: viewAdd, budget: viewBudget, analytics: viewAnalytics, tx: viewTx, fixed: viewFixed};
+  const views = {pending: viewPending, savings: viewSavings, now: viewNow, add: viewAdd, budget: viewBudget, analytics: viewAnalytics, tx: viewTx, fixed: viewFixed};
   m.innerHTML = '<section class="view">' + (views[S.tab] || viewNow)() + '</section>';
   afterRender();
   window.scrollTo(0, keepScroll);
@@ -893,6 +897,104 @@ function insights(){
 function aiBlock(){
   if (!S.sample) return '';
   return '<div style="border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:10px"><div class="row"><button class="btn" data-act="ai"' + (S.ai.busy ? ' disabled' : '') + '>' + (S.ai.busy ? 'Claude is reading your numbers…' : 'Ask Claude for a deeper review') + '</button><span class="note">Uses your Claude account</span></div>' + (S.ai.text ? '<div class="ai-out" id="aiOut">' + esc(S.ai.text) + '</div>' : '') + (S.ai.err ? '<p class="note neg">' + esc(S.ai.err) + '</p>' : '') + '</div>';
+}
+
+// ----- Pending transactions (from Revolut notifications on Android, via the sheet bridge) -----
+function parsePending(rows){
+  return rows.slice(1).map((r, i) => ({row: i + 2, id: String(r[0] || '').trim(), recv: r[1] || '', date: normDate(r[2]) || ymd(new Date()), type: (r[3] || 'Islaidos').trim(), cat: (r[4] || '').trim(), amt: Math.abs(num(r[5])), note: r[6] || '', vendor: (r[7] || '').trim(), raw: r[8] || '', flag: r[9] || ''})).filter(p => p.id);
+}
+function pendDraft(p){
+  const D = S.pendDraft || (S.pendDraft = {});
+  if (!D[p.id]) D[p.id] = {type: p.type === 'Pajamos' ? 'Pajamos' : 'Islaidos', amount: p.amt ? p.amt.toFixed(2) : '', cat: p.cat, vendor: p.vendor, date: p.date, note: p.note, catTouched: !!p.cat};
+  return D[p.id];
+}
+function guessCat(vendor, type){
+  const v = vendorStats().find(x => x.vendor.toLowerCase() === String(vendor || '').trim().toLowerCase()); if (!v) return '';
+  const c = Object.entries(v.cats).sort((a, b) => b[1] - a[1])[0][0];
+  return (type === 'Pajamos') === INCOME_CATS.includes(c) ? c : '';
+}
+// Same amount within two days, or the same vendor and amount in the same financial month.
+function pendDup(p, d){
+  const amt = Math.abs(num(d.amount)), day = parseYmd(d.date).getTime(), pk = pkFromDate(d.date), v = (d.vendor || '').toLowerCase();
+  return S.txns.find(t => Math.abs(Math.abs(t.amt) - amt) < 0.005 && (Math.abs(parseYmd(t.date).getTime() - day) <= 2 * 86400000 || (v && t.vendor.toLowerCase() === v && t.pk === pk)));
+}
+function viewPending(){
+  const list = (S.pending || []).slice().sort((a, b) => a.date.localeCompare(b.date) || a.row - b.row);
+  let h = '';
+  if (S.pendingErr) h += banner('warn', 'Could not read the Laukiancios tab', esc(errCopy(S.pendingErr).body));
+  h += '<div class="card"><div class="card-h"><h2>Pending transactions</h2><p>' + list.length + ' waiting · from Revolut notifications</p></div>' +
+    '<p class="note">Each payment notification on the Android phone lands here first. Check or change anything, then tap ✓ to save it to Transakcijos. Nothing here counts in the budget until it is approved.</p>' +
+    (list.length > 1 ? '<div class="row"><button class="btn sm" data-act="pendAll"' + (S.busy.pendAll ? ' disabled' : '') + '>' + (S.busy.pendAll ? 'Saving…' : '✓ Approve all with a category') + '</button></div>' : '') + '</div>';
+  if (!list.length) return h + '<div class="card"><div class="empty"><svg width="32" height="32" viewBox="0 0 24 24" fill="none"><path d="M4 12l5 5L20 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><b>All caught up</b><span class="note">New Revolut payments appear here within a few seconds.' + (S.bridge ? ' Set it up under ⚙ Settings → Automatic transactions.' : '') + '</span></div></div>';
+  for (const p of list){
+    const d = pendDraft(p), k = p.id, isExp = d.type !== 'Pajamos', dup = pendDup(p, d), busy = S.busy['p_' + k];
+    const cats = isExp ? GROUPS.map(g => '<optgroup label="' + esc(g.name) + '">' + g.cats.map(c => '<option' + (d.cat === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</optgroup>').join('') + '<optgroup label="Santaupos"><option' + (d.cat === SAVINGS ? ' selected' : '') + '>' + SAVINGS + '</option></optgroup>' + extraCats(true)
+                       : INCOME_CATS.map(c => '<option' + (d.cat === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
+    const pk = pkFromDate(d.date || ymd(new Date()));
+    h += '<form class="card pend" data-pid="' + esc(k) + '" autocomplete="off">' +
+      '<div class="card-h"><div class="seg" role="group" aria-label="Type"><button type="button" data-act="pendType" data-pid="' + esc(k) + '" data-v="Islaidos" aria-pressed="' + isExp + '">Expense</button><button type="button" data-act="pendType" data-pid="' + esc(k) + '" data-v="Pajamos" aria-pressed="' + !isExp + '">Income</button></div>' +
+      '<span class="row" style="gap:6px">' + (p.flag === 'refund' ? '<span class="pill warn">! refund</span>' : '') + (dup ? '<span class="pill warn" title="' + esc(dup.date + ' · ' + (dup.vendor || dup.cat) + ' · ' + fmtE(dup.amt)) + '">! possible duplicate</span>' : '') + '</span></div>' +
+      '<label class="f">Amount<span class="amt-wrap ' + (isExp ? 'exp' : 'inc') + '"><span class="amt-sign" aria-hidden="true">' + (isExp ? '−€' : '+€') + '</span><input class="inp amount-inp num" id="pa_' + esc(k) + '" data-pf="amount" data-pid="' + esc(k) + '" inputmode="decimal" value="' + esc(d.amount) + '"></span></label>' +
+      '<div class="grid g2"><label class="f">Vendor<input class="inp" id="pv_' + esc(k) + '" data-pf="vendor" data-pid="' + esc(k) + '" list="vendors" value="' + esc(d.vendor) + '"></label>' +
+      '<label class="f">Category<select class="inp" id="pc_' + esc(k) + '" data-pf="cat" data-pid="' + esc(k) + '"><option value="">Choose…</option>' + cats + '</select></label></div>' +
+      '<div class="grid g2"><label class="f">Date<input class="inp" type="date" id="pd_' + esc(k) + '" data-pf="date" data-pid="' + esc(k) + '" value="' + esc(d.date) + '"></label>' +
+      '<label class="f">Comment<input class="inp" id="pn_' + esc(k) + '" data-pf="note" data-pid="' + esc(k) + '" placeholder="Optional" value="' + esc(d.note) + '"></label></div>' +
+      (p.raw ? '<p class="note" style="font-family:var(--f-mono);font-size:.74rem">“' + esc(p.raw) + '”</p>' : '') +
+      (dup ? '<p class="note">Already in Transakcijos: ' + esc(dup.date) + ' · ' + esc(dup.vendor || dup.cat) + ' · ' + fmtE(dup.amt) + '. Discard this one if it is the same payment.</p>' : '') +
+      '<div class="row"><button class="btn primary" type="submit" data-pid="' + esc(k) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Saving…' : '✓ Approve') + '</button><span class="note">Books to ' + esc(pLabel(pk)) + '</span><span class="spacer"></span>' +
+      '<button class="btn ghost sm" type="button" data-act="pendDiscard" data-pid="' + esc(k) + '" style="color:var(--crit-ink)">' + (d.confirmDel ? 'Tap again to discard' : 'Discard') + '</button></div></form>';
+  }
+  return h + '<datalist id="vendors">' + vendorStats().slice(0, 200).map(v => '<option value="' + esc(v.vendor) + '">').join('') + '</datalist>';
+}
+async function removePendingRow(p){
+  // claude.ai view: clear the row, but only if it still holds this pending item.
+  const v = await getValues("'Laukiancios'!A" + p.row + ':A' + p.row);
+  if (!v[0] || String(v[0][0]).trim() !== p.id) return false;
+  await call('update_values', {spreadsheetId: SHEET, range: "'Laukiancios'!A" + p.row + ':J' + p.row, values: [['', '', '', '', '', '', '', '', '', '']]});
+  return true;
+}
+function pendRow(p){
+  const d = pendDraft(p), v = Math.abs(num(d.amount));
+  if (!(v > 0)) return {err: 'Enter an amount above zero'};
+  if (!d.cat) return {err: 'Choose a category'};
+  return {row: {date: d.date || ymd(new Date()), type: d.type, cat: d.cat, amt: d.type === 'Pajamos' ? v : -v, note: d.note || '', vendor: (d.vendor || '').trim()}};
+}
+async function approveOne(p){
+  const r = pendRow(p); if (r.err) throw {code: 'invalid', message: r.err};
+  const row = r.row;
+  if (S.bridge){
+    const res = await call('approve_pending', {id: p.id, row: {serial: serial(row.date), type: row.type, cat: row.cat, amt: Math.round(row.amt * 100) / 100, note: row.note, vendor: row.vendor}});
+    if (res.status === 'gone') throw {code: 'gone', message: res.reason};
+  } else {
+    await appendTxns([row]);
+    await removePendingRow(p);
+  }
+  if (row.cat === SAVINGS){ const st = savingsState(); if (st.known){ try { await writeSavingsH(st.now - row.amt); } catch(e) {} } }
+  S.pending = S.pending.filter(x => x.id !== p.id); delete S.pendDraft[p.id];
+  return row;
+}
+async function approvePending(pid){
+  const p = (S.pending || []).find(x => x.id === pid); if (!p) return;
+  const r = pendRow(p); if (r.err){ toast(r.err); return; }
+  S.busy['p_' + pid] = true; render();
+  try { const row = await approveOne(p); toast(fmtE(row.amt) + ' · ' + row.cat + ' saved to Transakcijos'); }
+  catch(e){ toast(e.code === 'gone' ? e.message : (errCopy(e).title + '. ' + errCopy(e).body)); }
+  finally { delete S.busy['p_' + pid]; await loadAll().catch(() => {}); }
+}
+async function approveAllPending(){
+  const ready = (S.pending || []).filter(p => !pendRow(p).err && !pendDup(p, pendDraft(p)));
+  if (!ready.length){ toast('Nothing ready: each needs an amount and a category, and possible duplicates are skipped'); return; }
+  S.busy.pendAll = true; render(); let n = 0;
+  try { for (const p of ready){ try { await approveOne(p); n++; } catch(e) { if (e.code !== 'gone') throw e; } } toast(n + ' saved to Transakcijos'); }
+  catch(e){ toast(n + ' saved, then: ' + errCopy(e).title); }
+  finally { S.busy.pendAll = false; await loadAll().catch(() => {}); }
+}
+async function discardPending(pid){
+  const p = (S.pending || []).find(x => x.id === pid); if (!p) return;
+  S.busy['p_' + pid] = true; render();
+  try { if (S.bridge) await call('discard_pending', {id: pid}); else await removePendingRow(p); S.pending = S.pending.filter(x => x.id !== pid); delete S.pendDraft[pid]; toast('Discarded'); }
+  catch(e){ toast(errCopy(e).title + '. ' + errCopy(e).body); }
+  finally { delete S.busy['p_' + pid]; await loadAll().catch(() => {}); }
 }
 
 // ----- Monthly transfers from Dad's and Mom's own accounts to the family account -----
@@ -1388,6 +1490,9 @@ document.addEventListener('click', async e => {
     const prevLen = S.fixed.length + 1; while (rows.length < prevLen) rows.push(['','','','','','','','']);
     guardedWrite('fx', async () => { await call('update_values', {spreadsheetId: SHEET, range: "'Fiksuotos islaidos'!A1:H" + rows.length, values: rows}); S.fxDirty = false; S.fx = null; }, 'Fixed costs saved to the sheet'); }
   else if (act === 'ai'){ runAI(); }
+  else if (act === 'pendType'){ const d = S.pendDraft[t.dataset.pid]; if (d){ d.type = t.dataset.v; if (!d.catTouched || (d.type === 'Pajamos') !== INCOME_CATS.includes(d.cat)){ d.cat = guessCat(d.vendor, d.type); d.catTouched = false; } render(); } }
+  else if (act === 'pendDiscard'){ const d = S.pendDraft[t.dataset.pid]; if (d && !d.confirmDel){ d.confirmDel = true; render(); return; } discardPending(t.dataset.pid); }
+  else if (act === 'pendAll'){ approveAllPending(); }
   else if (act === 'toggleTransfer'){ S.openTransfer = S.openTransfer === t.dataset.v ? null : t.dataset.v; render(); }
   else if (act === 'editTx'){ openEdit(+t.dataset.row); }
   else if (act === 'editClose'){ if (e.target === t || t.tagName === 'BUTTON') closeEdit(); }
@@ -1402,6 +1507,7 @@ document.addEventListener('click', async e => {
     const s = savingsState(), now = new Date(), tl = savingsTimeline(); const expected = s.known ? s.now : (tl ? tl.now : s.contrib); const exp = Math.round(expected * 100) / 100;
     const row = [ymd(now) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()), Math.round(bal * 100) / 100, exp, Math.round((bal - expected) * 100) / 100, maxTxRow(), s.known ? '' : 'Pirmas patikrinimas'];
     guardedWrite('snap', async () => { await appendRowTo('Santaupos', 'F', row); try { await writeSavingsH(bal); } catch(e) {} }, 'Savings balance saved · interest ' + fmtSigned(bal - expected)); }
+  else if (act === 'copyField'){ const inp = document.getElementById(t.dataset.v); try { await navigator.clipboard.writeText(inp.value); toast('Copied'); } catch(_){ inp.focus(); inp.select(); } }
   else if (act === 'copyLink'){ const inp = $('#shareLink'); try { await navigator.clipboard.writeText(inp.value); toast('Setup link copied'); } catch(_){ inp.focus(); inp.select(); toast('Link selected — copy it from the menu'); } }
   else if (act === 'disconnect'){ if (t.dataset.confirm !== '1'){ t.dataset.confirm = '1'; t.textContent = 'Tap again to disconnect'; return; } saveBridge(null); S.bridge = null; S.txns = []; S.status = 'setup'; S.tab = 'settings'; render(); paintSync(); }
 });
@@ -1413,6 +1519,7 @@ document.addEventListener('input', e => {
   const id = e.target.id;
   if (id === 'rcRev' || id === 'rcCash'){ updateReconLive(); return; }
   if (e.target.dataset.fx){ if (!S.fxDirty){ S.fxDirty = true; readFxInputs(); render(); const el = document.getElementById(id); if (el){ el.focus(); if (el.setSelectionRange && el.type !== 'checkbox' && el.tagName === 'INPUT'){ const n = el.value.length; try { el.setSelectionRange(n, n); } catch(_){} } } } return; }
+  if (e.target.dataset.pf && S.pendDraft && S.pendDraft[e.target.dataset.pid]){ const d = S.pendDraft[e.target.dataset.pid], f = e.target.dataset.pf; let v = e.target.value; if (f === 'amount'){ const c = v.replace(/[^\d.,]/g, ''); if (c !== v) e.target.value = c; v = c; } d[f] = v; return; }
   if (id === 'wdAmt' || id === 'wdNote'){ if (id === 'wdAmt'){ const c = e.target.value.replace(/[^\d.,]/g, ''); if (c !== e.target.value) e.target.value = c; S.wd.amount = c; } else S.wd.note = e.target.value; return; }
   if (id === 'aAmt'){ const v = e.target.value; const clean = v.replace(/[^\d.,]/g, ''); if (clean !== v) e.target.value = clean; S.add.amount = clean; return; }
   if (e.target.dataset.bud !== undefined){ S.bud.draft[e.target.dataset.bud] = e.target.value.replace(/[^\d.,]/g, ''); S.bud.dirty = true; updateBudgetLive(); return; }
@@ -1422,6 +1529,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   const id = e.target.id;
+  if (e.target.dataset.pf && S.pendDraft && S.pendDraft[e.target.dataset.pid]){ const d = S.pendDraft[e.target.dataset.pid], f = e.target.dataset.pf; d[f] = e.target.value; if (f === 'cat') d.catTouched = true; if (f === 'vendor' && !d.catTouched){ const g = guessCat(d.vendor, d.type); if (g) d.cat = g; } render(); return; }
   if (id === 'aCat'){ S.add.cat = e.target.value; S.add.catTouched = true; render(); }
   else if (id === 'aDate'){ S.add.date = e.target.value || ymd(new Date()); const pk = pkFromDate(S.add.date); ensureBudget(pk); render(); }
   else if (id === 'aVendor'){ S.add.vendor = e.target.value.trim(); if (!S.add.catTouched){ const v = vendorStats().find(x => x.vendor.toLowerCase() === S.add.vendor.toLowerCase()); if (v){ const c = Object.entries(v.cats).sort((a,b) => b[1]-a[1])[0][0]; const isInc = INCOME_CATS.includes(c); if ((S.add.type === 'Pajamos') === isInc){ S.add.cat = c; S.add.vendor = v.vendor; } } } render(); }
@@ -1432,6 +1540,7 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('submit', e => {
   if (e.target.id === 'editForm'){ e.preventDefault(); saveEdit(); return; }
+  if (e.target.classList && e.target.classList.contains('pend')){ e.preventDefault(); approvePending(e.target.dataset.pid); return; }
   if (e.target.id === 'wdForm'){
     e.preventDefault(); const W = S.wd; W.amount = $('#wdAmt').value; W.date = $('#wdDate').value || ymd(new Date()); W.note = $('#wdNote').value.trim();
     const v = Math.abs(num(W.amount)); if (!(v > 0)){ toast('Enter an amount above zero'); return; }
@@ -1494,6 +1603,19 @@ function readSetupHash(){
   history.replaceState(null, '', location.pathname + location.search);
 }
 function setupLink(){ const b = S.bridge; if (!b) return ''; return location.origin + location.pathname + '#setup=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify({u: b.url, k: b.key}))))); }
+function macroDroidCard(b){
+  const row = (label, val, id) => '<label class="f" for="' + id + '">' + label + '<div class="row" style="flex-wrap:nowrap"><input class="inp num" id="' + id + '" readonly value="' + esc(val) + '" style="flex:1;min-width:0;font-size:.78rem"><button class="btn sm" type="button" data-act="copyField" data-v="' + id + '">Copy</button></div></label>';
+  return '<div class="card"><div class="card-h"><h3>Automatic transactions from Revolut (Android)</h3></div>' +
+    '<p class="note">Each Revolut payment notification is sent to the Pending tab, where you approve it. Uses the free app MacroDroid on the Android phone.</p>' +
+    '<ol class="note" style="padding-left:18px;display:flex;flex-direction:column;gap:6px;margin:0">' +
+      '<li>Install <b>MacroDroid</b> from Google Play and allow its <b>notification access</b> when asked.</li>' +
+      '<li>New macro → <b>Trigger</b>: Device Events → <b>Notification</b> → Notification received → Select applications: <b>Revolut</b> → Any content.</li>' +
+      '<li><b>Action</b>: Connectivity → <b>HTTP Request</b> → method <b>POST</b>, URL below.</li>' +
+      '<li>Under <b>Query parameters</b> add these four (name = value). For title and text use the <b>…</b> button to insert the notification magic text.</li></ol>' +
+    row('URL', b.url, 'mdUrl') +
+    '<div class="grid g2">' + row('key =', b.key, 'mdKey') + row('tool =', 'ingest_notification', 'mdTool') + row('title =', '[notification_title]', 'mdTitle') + row('text =', '[notification]', 'mdText') + '</div>' +
+    '<p class="note">Save the macro, then make a small card payment: it shows up under Pending within seconds. Moves to your own savings pockets are ignored automatically.</p></div>';
+}
 function viewSettings(){
   const b = S.bridge;
   let h = '';
@@ -1514,6 +1636,7 @@ function viewSettings(){
     '<label class="f" for="suKey">Access key<input class="inp num" id="suKey" placeholder="The KEY from Code.gs" value="' + esc(b ? b.key : '') + '" required></label>' +
     (S.setupErr ? '<p class="note neg">' + esc(S.setupErr) + '</p>' : '') +
     '<div class="row"><button class="btn primary" type="submit"' + (S.busy.setup ? ' disabled' : '') + '>' + (S.busy.setup ? 'Checking…' : 'Connect') + '</button>' + (b ? '<button class="btn ghost" type="button" data-tab="now">Back to the app</button>' : '') + '</div></form>';
+  if (b) h += macroDroidCard(b);
   h += '<div class="card"><div class="card-h"><h3>Install as an app</h3></div><p class="note"><b>Android (Chrome):</b> menu ⋮ → <b>Install app</b> or <b>Add to Home screen</b>.<br><b>iPhone:</b> Share → <b>Add to Home Screen</b>.<br>It then opens full screen from its own icon.</p></div>';
   return h;
 }

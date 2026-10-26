@@ -1,20 +1,27 @@
 /**
- * Family Finances 2026 — bridge between the phone app and this spreadsheet.
+ * Family Finances 2026 — bridge between the phone app and the spreadsheet.
  *
  * Setup (once):
- *   1. Go to script.google.com → New project (works on a phone in Chrome's Desktop site),
- *      or in the sheet: Extensions → Apps Script.
+ *   1. script.google.com → New project (or in the sheet: Extensions → Apps Script).
  *   2. Replace everything in Code.gs with this file and press Save.
  *   3. Set KEY below to a long random value (the app asks for the same value).
- *   4. Deploy → New deployment → type "Web app".
- *        Execute as: Me      Who has access: Anyone
+ *   4. Deploy → New deployment → type "Web app".  Execute as: Me   Who has access: Anyone
  *      Authorize when asked, then copy the Web app URL (ends with /exec).
  *   5. Open the app, paste the URL and the KEY.
+ *
+ * Updating this script later: Deploy → Manage deployments → ✏ Edit → Version: New version → Deploy.
+ * That keeps the same URL, so the phones keep working.
  *
  * Anyone with BOTH the URL and the KEY can read and change the budget,
  * so share them only with the people who use the app.
  */
 const KEY = 'CHANGE_ME_TO_A_LONG_RANDOM_VALUE';
+const SHEET_ID = '13ecuoVtA3oRFgHIi3gHDH7msAtxfuUfhwV2EV57j7CA'; // Family Finances 2026
+const TZ = 'Europe/Vilnius';
+const PENDING = 'Laukiancios';
+const PENDING_HEADERS = ['ID', 'Gauta', 'Data', 'Tipas', 'Kategorija', 'Suma', 'Komentarai', 'Vendorius', 'Pranesimas', 'Pastabos'];
+
+function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
 
 function doGet() {
   return json_({ ok: true, app: 'family-finances', hint: 'POST only' });
@@ -22,25 +29,29 @@ function doGet() {
 
 function doPost(e) {
   try {
-    const req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    // JSON body from the app, or plain form/query parameters (e.g. from MacroDroid).
+    let req = {};
+    try { req = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { req = {}; }
+    const p = (e && e.parameter) || {};
+    if (!req.key && p.key) req = { key: p.key, tool: p.tool || 'ingest_notification', input: { title: p.title || '', text: p.text || '', app: p.app || '' } };
     if (!KEY || KEY.indexOf('CHANGE_ME') === 0) return json_({ error: 'The KEY in Code.gs has not been set.', code: 'not_configured' });
     if (req.key !== KEY) return json_({ error: 'Wrong access key.', code: 'unauthorized' });
     const input = req.input || {};
     switch (req.tool) {
-      case 'get_values':     return json_(getValues_(input.range));
-      case 'update_values':  return locked_(() => updateValues_(input.range, input.values));
-      case 'update_formulas':return locked_(() => updateFormulas_(input.range, input.formulas));
-      case 'append_tx':      return locked_(() => appendTx_(input.rows || []));
-      case 'append_row':     return locked_(() => appendRow_(input.sheet, input.values));
-      default:               return json_({ error: 'Unknown operation: ' + req.tool, code: 'bad_request' });
+      case 'get_values':          return json_(getValues_(input.range));
+      case 'update_values':       return locked_(() => updateValues_(input.range, input.values));
+      case 'update_formulas':     return locked_(() => updateFormulas_(input.range, input.formulas));
+      case 'append_tx':           return locked_(() => appendTx_(input.rows || []));
+      case 'append_row':          return locked_(() => appendRow_(input.sheet, input.values));
+      case 'ingest_notification': return locked_(() => ingest_(input));
+      case 'approve_pending':     return locked_(() => approvePending_(input.id, input.row));
+      case 'discard_pending':     return locked_(() => discardPending_(input.id));
+      default:                    return json_({ error: 'Unknown operation: ' + req.tool, code: 'bad_request' });
     }
   } catch (err) {
     return json_({ error: String(err && err.message || err), code: 'tool_error' });
   }
 }
-
-const SHEET_ID = '13ecuoVtA3oRFgHIi3gHDH7msAtxfuUfhwV2EV57j7CA'; // Family Finances 2026
-function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
 
 function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
@@ -51,9 +62,7 @@ function locked_(fn) {
   try { const r = fn(); SpreadsheetApp.flush(); return json_(r); }
   finally { lock.releaseLock(); }
 }
-function range_(a1) {
-  return ss_().getRange(a1);
-}
+function range_(a1) { return ss_().getRange(a1); }
 
 // Same shape as the Google Sheets connector: formatted cell text, trailing empty rows/cells trimmed.
 function getValues_(a1) {
@@ -87,15 +96,15 @@ function updateFormulas_(a1, formulas) {
 function appendTx_(rows) {
   const sh = ss_().getSheetByName('Transakcijos');
   const start = lastRowInCol_(sh, 1) + 1;
-  rows.forEach((r, i) => {
-    const row = start + i;
-    sh.getRange(row, 1, 1, 6).setValues([[r.serial, r.type, r.cat, r.amt, r.note || '', r.vendor || '']]);
-    sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd');
-    sh.getRange(row, 4).setNumberFormat('[$€]#,##0.00');
-    if (r.periodOverride) sh.getRange(row, 7).setValue(r.periodOverride);
-    else sh.getRange(row, 7).setFormula('=TEXT(IF(DAY(A' + row + ') < 10, A' + row + ' - DAY(A' + row + '), A' + row + '), "YYY, MMMM")');
-  });
+  rows.forEach((r, i) => writeTx_(sh, start + i, r));
   return { status: 'success', start: start };
+}
+function writeTx_(sh, row, r) {
+  sh.getRange(row, 1, 1, 6).setValues([[r.serial, r.type, r.cat, r.amt, r.note || '', r.vendor || '']]);
+  sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(row, 4).setNumberFormat('[$€]#,##0.00');
+  if (r.periodOverride) sh.getRange(row, 7).setValue(r.periodOverride);
+  else sh.getRange(row, 7).setFormula('=TEXT(IF(DAY(A' + row + ') < 10, A' + row + ' - DAY(A' + row + '), A' + row + '), "YYY, MMMM")');
 }
 function appendRow_(sheetName, values) {
   const sh = ss_().getSheetByName(sheetName);
@@ -109,4 +118,95 @@ function lastRowInCol_(sh, col) {
   const v = sh.getRange(1, col, n, 1).getValues();
   for (let i = v.length - 1; i >= 0; i--) if (v[i][0] !== '' && v[i][0] !== null) return i + 1;
   return 0;
+}
+
+// ---------- Pending transactions from Revolut notifications ----------
+function pendingSheet_() {
+  const ss = ss_();
+  let sh = ss.getSheetByName(PENDING);
+  if (!sh) { sh = ss.insertSheet(PENDING); sh.getRange(1, 1, 1, PENDING_HEADERS.length).setValues([PENDING_HEADERS]).setFontWeight('bold'); sh.setFrozenRows(1); }
+  return sh;
+}
+function todaySerial_() {
+  const d = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd').split('-').map(Number);
+  return Math.round((Date.UTC(d[0], d[1] - 1, d[2]) - Date.UTC(1899, 11, 30)) / 86400000);
+}
+// "€12.34", "12,34 €", "EUR 1,234.56", "-€5" → number; null if no amount in the text.
+function parseAmount_(s) {
+  const m = s.match(/(?:€|EUR)\s*-?\s*(\d[\d\s.,]*\d|\d)/i) || s.match(/(-?\d[\d\s.,]*\d|\d)\s*(?:€|EUR)/i);
+  if (!m) return null;
+  let t = m[1].replace(/\s/g, '');
+  if (/,\d{2}$/.test(t)) t = t.replace(/\./g, '').replace(',', '.'); else t = t.replace(/,/g, '');
+  const n = parseFloat(t);
+  return isNaN(n) ? null : Math.abs(n);
+}
+function guessVendor_(title, text) {
+  const m = text.match(/\b(?:at|pas|in|to|from|iš|is)\s+([^,.\n€]+?)(?:\s+(?:with|using|card|kortel)|[,.\n]|$)/i);
+  if (m && m[1].trim().length > 1) return m[1].trim();
+  const t = String(title || '').trim();
+  if (t && !/^revolut$/i.test(t) && !/€|\d/.test(t)) return t;
+  return '';
+}
+function guessCategory_(vendor) {
+  if (!vendor) return '';
+  const sh = ss_().getSheetByName('Transakcijos');
+  const n = lastRowInCol_(sh, 1); if (n < 2) return '';
+  const v = sh.getRange(2, 3, n - 1, 4).getValues(); // C..F
+  const key = vendor.toLowerCase(), count = {};
+  v.forEach(r => { if (String(r[3]).trim().toLowerCase() === key && r[0]) count[r[0]] = (count[r[0]] || 0) + 1; });
+  let best = '', bn = 0; Object.keys(count).forEach(c => { if (count[c] > bn) { best = c; bn = count[c]; } });
+  return best;
+}
+function ingest_(input) {
+  const title = String(input.title || '').trim(), text = String(input.text || '').trim();
+  const all = (title + ' ' + text).trim();
+  if (!all) return { status: 'skipped', reason: 'empty' };
+  // Moves between own Revolut pockets/savings are recorded by the family themselves.
+  if (/savings|taupym|vault|instant access|exchanged|keitimas|pocket/i.test(all)) return { status: 'skipped', reason: 'own transfer' };
+  const amt = parseAmount_(all);
+  if (amt === null || amt === 0) return { status: 'skipped', reason: 'no amount' };
+  const sh = pendingSheet_();
+  // MacroDroid can fire twice for one notification: skip an identical one from the last 3 minutes.
+  const last = lastRowInCol_(sh, 1), now = new Date();
+  if (last >= 2) {
+    const recent = sh.getRange(Math.max(2, last - 10), 1, Math.min(11, last - 1), 9).getValues();
+    if (recent.some(r => r[8] === all && r[1] instanceof Date && now - r[1] < 180000)) return { status: 'skipped', reason: 'duplicate notification' };
+  }
+  const income = /received|gavai|gavote|gauta|sent you|atsiuntė|top.?up|papild|refund|grąžin|grazin/i.test(all);
+  const refund = /refund|grąžin|grazin|returned/i.test(all);
+  const vendor = guessVendor_(title, text);
+  const cat = income ? (refund ? '' : 'Kitos pajamos') : guessCategory_(vendor);
+  const id = 'p' + now.getTime().toString(36);
+  const row = last + 1;
+  sh.getRange(row, 1, 1, 10).setValues([[id, now, todaySerial_(), income ? 'Pajamos' : 'Islaidos', cat, amt, '', vendor, all, refund ? 'refund' : '']]);
+  sh.getRange(row, 2).setNumberFormat('yyyy-mm-dd hh:mm');
+  sh.getRange(row, 3).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(row, 6).setNumberFormat('[$€]#,##0.00');
+  return { status: 'success', id: id, amount: amt, vendor: vendor, category: cat };
+}
+function findPending_(sh, id) {
+  const last = lastRowInCol_(sh, 1); if (last < 2) return 0;
+  const ids = sh.getRange(2, 1, last - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (ids[i][0] === id) return i + 2;
+  return 0;
+}
+// Saves one pending transaction to Transakcijos and removes it from the pending tab, in one locked step.
+function approvePending_(id, r) {
+  const sh = pendingSheet_(), row = findPending_(sh, id);
+  if (!row) return { status: 'gone', reason: 'Already approved or discarded on the other phone.' };
+  const tx = ss_().getSheetByName('Transakcijos');
+  const at = lastRowInCol_(tx, 1) + 1;
+  writeTx_(tx, at, r);
+  sh.deleteRow(row);
+  return { status: 'success', start: at };
+}
+function discardPending_(id) {
+  const sh = pendingSheet_(), row = findPending_(sh, id);
+  if (row) sh.deleteRow(row);
+  return { status: 'success' };
+}
+
+// Run this once from the editor (select testIngest → Run) to see a sample appear in the app.
+function testIngest() {
+  Logger.log(JSON.stringify(ingest_({ title: 'Maxima', text: 'Paid €12.34 at Maxima' })));
 }

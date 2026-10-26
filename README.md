@@ -5,6 +5,7 @@ A phone app for the family budget. It reads and writes the **Family Finances 202
 - **Current situation**: what came in, what was spent, what is in the joint account, and what is expected to be left over on the 9th.
 - **Add transaction**: saved as a new row in the Transakcijos tab.
 - **Budget**: edit this month's budget or plan next month (Seimos Biudzetas tab).
+- **Pending**: payments caught from Revolut notifications on Android (MacroDroid → bridge → Laukiancios tab), edited and approved into Transakcijos.
 - **Analytics, Transactions, Fixed costs**: drill-downs, trends and the costs posted on the 10th.
 
 Financial months run from the 10th to the 9th.
