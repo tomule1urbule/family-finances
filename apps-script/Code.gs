@@ -145,9 +145,10 @@ function cleanMagic_(s) { return String(s || '').replace(/\[[a-z_]+\]|\{[a-z_]+\
 function guessVendor_(title, text) {
   // Revolut titles look like "Joint · Eurovaistinė" (account · merchant): take the part after the dot.
   const tp = String(title || '').split(/\s*[·•|]\s*/).map(x => x.trim()).filter(Boolean);
-  if (tp.length > 1 && !/€|\d/.test(tp[tp.length - 1])) return tp[tp.length - 1];
-  const m = text.match(/\b(?:at|pas|in|to|from|iš|is)\s+([^,.\n€]+?)(?:\s+(?:with|using|card|kortel)|[,.\n]|$)/i);
-  if (m && m[1].trim().length > 1) return m[1].trim();
+  const last = tp.length > 1 ? tp[tp.length - 1] : '';
+  if (last && !/€|\d/.test(last) && !GENERIC_TITLE.test(last.replace(/[^\p{L}\s]/gu, '').trim())) return last;
+  const m = text.match(/\b(?:at|pas|in|to|from|iš|is)\s+([^,.\n€]+?)(?:\s+(?:with|using|card|kortel|from|iš|is)\b|[,.\n!]|$)/i);
+  if (m && m[1].trim().length > 1) return m[1].trim().replace(/^(UAB|AB|MB|VŠĮ|VSI|IĮ)\s+/i, '');
   const t = String(title || '').trim();
   if (t && !/^(revolut|joint|personal|bendr\S*)$/i.test(t) && !/€|\d/.test(t)) return t;
   return '';
@@ -162,11 +163,19 @@ function guessCategory_(vendor) {
   let best = '', bn = 0; Object.keys(count).forEach(c => { if (count[c] > bn) { best = c; bn = count[c]; } });
   return best;
 }
+// Revolut titles that describe the event, not the merchant ("Joint · Money sent").
+const GENERIC_TITLE = /^(money sent|payment|card payment|transfer|pinigai i[sš]si[uų]sti|mok[eė]jimas|pervedimas)$/i;
+// "Bumbis ❤️ has sent €20.35 to UAB AZETA VAISTINE from your joint account": the other joint-account
+// holder paying someone. Returns the payer's name so it can go into the comment.
+function jointPayer_(text) {
+  const m = text.match(/^(.*?)\s+(?:has sent|sent|paid|spent)\s+(?:€|EUR)?\s*\d[\d.,]*\s*(?:€|EUR)?\s+(?:to|at)\s+.+\bjoint account/i);
+  return m ? m[1].replace(/[^\p{L}\p{N}\s.'-]/gu, '').trim() : '';
+}
 // Only card payments / purchases become pending transactions. Everything else Revolut sends
 // (referral bonuses, offers, transfers received, top-ups, savings moves) is skipped and logged.
-const EXPENSE_WORDS = /\b(paid|spent|payment|purchase|charged|declined)\b|apmok[eė]j|sumok[eė]j|i[sš]leid|mok[eė]jim|pirkin|nura[sš]yt/i;
+const EXPENSE_WORDS = /\b(paid|spent|payment|purchase|charged|declined)\b|\bsent\s+(?:€|EUR)?\s*\d[\d.,]*\s*(?:€|EUR)?\s+to\s|apmok[eė]j|sumok[eė]j|i[sš]leid|mok[eė]jim|pirkin|nura[sš]yt/i;
 const EXPENSE_SHAPE = /(?:€|EUR)\s*\d[\d.,]*\s+(?:at|pas)\s+\S|\d[\d.,]*\s*(?:€|EUR)\s+(?:at|pas)\s+\S/i;
-const NOT_EXPENSE = /bonus|premij|referr|refer a|invite|friend|draug|pakviesk|earn|u[zž]dirb|reward|win\b|laim[eė]|offer|pasi[uū]lym|promo|akcij|up to|iki\s*(?:€|\d)|get\s*(?:€|\d)|gauk|gauti|received|gavai|gavote|gauta|sent you|atsiunt|top.?up|papild|refund|gr[aą][zž]in|returned|savings|taupym|vault|instant access|exchanged|keitimas|pocket|declined|atmest/i;
+const NOT_EXPENSE = /bonus|premij|referr|refer a|invite|friend|draug|pakviesk|earn|u[zž]dirb|reward|win\b|laim[eė]|offer|pasi[uū]lym|promo|akcij|up to|iki\s*(?:€|\d)|get\s*(?:€|\d)|gauk|gauti|received|gavai|gavote|gauta|sent you\s*(?:€|EUR|\d)|atsiunt|top.?up|papild|refund|gr[aą][zž]in|returned|savings|taupym|vault|instant access|exchanged|keitimas|pocket|declined|atmest/i;
 function ingest_(input) {
   const title = cleanMagic_(input.title), text = cleanMagic_(input.text);
   const all = (title + ' ' + text).trim();
@@ -186,7 +195,8 @@ function ingest_(input) {
   const cat = guessCategory_(vendor);
   const id = 'p' + now.getTime().toString(36);
   const row = last + 1;
-  sh.getRange(row, 1, 1, 10).setValues([[id, now, todaySerial_(), 'Islaidos', cat, amt, '', vendor, all, '']]);
+  const payer = jointPayer_(text);
+  sh.getRange(row, 1, 1, 10).setValues([[id, now, todaySerial_(), 'Islaidos', cat, amt, payer ? 'Paid by ' + payer : '', vendor, all, '']]);
   sh.getRange(row, 2).setNumberFormat('yyyy-mm-dd hh:mm');
   sh.getRange(row, 3).setNumberFormat('yyyy-mm-dd');
   sh.getRange(row, 6).setNumberFormat('[$€]#,##0.00');
