@@ -181,7 +181,7 @@ function ingest_(input) {
   const all = (title + ' ' + text).trim();
   if (!all) return logNotif_(all, 'skipped: empty');
   // Only the joint (family) account is tracked: personal-account spending is ignored.
-  if (!/\bjoint\b|bendr/i.test(all)) return logNotif_(all, 'skipped: not joint account');
+  if (!/\bjoint\b/i.test(all)) return logNotif_(all, 'skipped: not joint account');
   if (NOT_EXPENSE.test(all)) return logNotif_(all, 'skipped: not an expense');
   if (!EXPENSE_WORDS.test(all) && !EXPENSE_SHAPE.test(all)) return logNotif_(all, 'skipped: no payment wording');
   const amt = parseAmount_(all);
